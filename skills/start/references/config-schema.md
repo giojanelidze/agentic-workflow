@@ -38,6 +38,7 @@ Written by `/agentic-workflow:setup`. Every field outside `jira` is optional; de
 - `transitions.*` are transition **names**; the analyst resolves them to ids at call time.
 - `writeMode`: `none` | `labels` | `labels+comments` | `labels+comments+transition`. Setup mirrors it in the user's permission rules (write tools outside the mode go to `deny`).
 - `investigation` (optional): before asking the operator, the analyst looks for the answer in the repo (`code`, default true) and, if `browser` is set, in the running app. The browser is read-only, limited to `allowedOrigins`, and must point at a non-production environment. Without `browser` (or without `browserPrefix` in `local.json`) the browser is not used.
+- `baseBranch`: the branch feature branches start from and the pull request targets (`gh pr create --base`). `/agentic-workflow:setup` asks for it and writes it. Without it the orchestrator uses the repository's default branch, and asks if it cannot find one. It applies to the whole repository, not to a single ticket.
 - `commands.*` `null` means discover from `package.json`, `nx.json`, `Makefile`, CI config.
 - Defaults: `branchPattern` `<type>/<KEY>-<slug>` (`<type>` from the ticket type: `feat`, `fix`, `chore`), `commitFormat` `<KEY>: <summary>`, `prTitle` `[<KEY>] <summary>`, `prDraft` true, `baseBranch` from `gh repo view --json defaultBranchRef`.
 

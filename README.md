@@ -122,7 +122,7 @@ The full flow (when the stage starts, parallel execution, aggregation, the fix l
 
 ## Configure
 
-Personal options (`/plugin configure agentic-workflow`): `defaultAuto`. Everything else is stored by `/agentic-workflow:setup`; see `skills/start/references/config-schema.md`. Without per-repo settings the plugin discovers scripts itself and uses these defaults: branch `feat/ABC-123-short-title`, commit subject `ABC-123: summary`, PR title `[ABC-123] summary`, PR as draft.
+Personal options (`/plugin configure agentic-workflow`): `defaultAuto`. Everything else is stored by `/agentic-workflow:setup`; see `skills/start/references/config-schema.md`. Without per-repo settings the plugin discovers scripts itself and uses these defaults: branch `feat/ABC-123-short-title`, commit subject `ABC-123: summary`, PR title `[ABC-123] summary`, PR as draft, PR target the repository's default branch (setup asks for `baseBranch` if you want another one, such as `develop`).
 
 ## Safety
 
