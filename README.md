@@ -12,7 +12,9 @@ Jira board (your assigned tickets)
   -> test-runner (baseline)
   -> implementer (per task)  commits on a feature branch
   -> test-runner             new failures go back to the implementer (max 3 rounds)
-  -> code-reviewer           blocking findings go back to the implementer (max 2 rounds)
+  -> 4 reviewers in parallel correctness, conventions, security, performance (read-only)
+  -> review-aggregator       one verdict; blockers go back to the implementer (max 3 rounds,
+                             then to you); suggestions and nits become one PR comment
                                                 -- checkpoint 2: approve push and draft PR
   -> pr-publisher            rebase, secret scan, push, draft PR, CI watch
                                                 -- checkpoint 3: approve what is written to Jira
@@ -61,7 +63,7 @@ Local development: `claude --plugin-dir .`
 ```
 
 - By default the run stops at the three checkpoints above.
-- `--auto` skips them. It still stops for blocking ticket questions, required planner questions, a secret found in the diff, an exhausted loop limit, a rebase conflict, or an analyst error.
+- `--auto` skips them. It still stops for blocking ticket questions, required planner questions, a secret found in the diff (including by a reviewer), an exhausted loop limit, blockers still open after the third review round, a rebase conflict, or an analyst error.
 - A ticket missing information is parked in `.agentic-workflow/pending/<KEY>.md` with specific questions. Answer in the conversation, or edit the file and mark `operator_status: answered`; the next run picks it up first.
 - A ticket that already has a PR is never picked up again.
 - Re-running a key offers to resume from `.agentic-workflow/<KEY>/state.json`.
@@ -89,6 +91,24 @@ When something is missing it asks instead of guessing:
 - **A technical choice** (a new dependency, a public API change, a trade-off with no precedent in the repo): you get the question with options and choose; the planner then runs again with your answer.
 
 The same question is never asked twice, and the loops are capped (3 planner re-runs, 2 checkpoint edits); at a limit the run stops with `blocked.md`.
+
+## Review
+
+After the implementer finishes and lint, typecheck, tests and build pass, four read-only reviewers look at the change in parallel, each in a fresh context, and `review-aggregator` merges their reports into one verdict (`approve` or `changes_required`):
+
+| Agent | Focus |
+|---|---|
+| [`correctness-reviewer`](agents/correctness-reviewer.md) | Does it do what the task asks: logic, edge cases, error handling, regressions, tests |
+| [`conventions-reviewer`](agents/conventions-reviewer.md) | The project's own rules (`CLAUDE.md`, checklists, lint config, neighbouring code), Angular and TypeScript patterns, reuse |
+| [`security-reviewer`](agents/security-reviewer.md) | Input validation, auth, secrets, XSS and unsafe HTML, user data, risky dependencies |
+| [`performance-reviewer`](agents/performance-reviewer.md) | Change detection, leaks, needless work or requests, bundle impact, hot paths |
+| [`review-aggregator`](agents/review-aggregator.md) | Merges the four reports, removes duplicates, decides the verdict; adds no findings of its own |
+
+- Reviewers get the task description and the diff, never the implementer's reasoning, and only have read tools. Each stays in its own focus and reports only what it verified.
+- Only blockers go back to the implementer, then the checks run again and the review repeats. After 3 rounds, remaining blockers are handed to you: fix by hand, publish a draft PR that lists them, or give up on the ticket. A secret in the diff stops the run at once.
+- Suggestions and nits are never fixed automatically. They are posted as one PR comment for the human reviewer.
+
+The full flow (when the stage starts, parallel execution, aggregation, the fix loop, the 3-round limit and escalation) is in [`skills/start/references/review-workflow.md`](skills/start/references/review-workflow.md).
 
 ## Project knowledge
 
@@ -118,7 +138,7 @@ Personal options (`/plugin configure agentic-workflow`): `defaultAuto`. Everythi
 
 - `/agentic-workflow:address-review`: handle PR review comments.
 - `--worktree` isolation.
-- Repository memory for `implementation-planner` and `code-reviewer` too.
+- Repository memory for `implementation-planner` and the reviewers too.
 - Plugin evals (`claude plugin eval`): unclear ticket, dirty tree or `main`, resume.
 - Optional SessionStart hook.
 

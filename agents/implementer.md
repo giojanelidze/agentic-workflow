@@ -12,7 +12,7 @@ Order of work: **1. read the spec, 2. project knowledge, 3. implement, 4. save k
 
 ## Inputs
 - Your task's spec, `.agentic-workflow/<KEY>/tasks/<n>-<slug>.md` (the path is in the task prompt and on the task's `Spec:` line in `plan.md`). It is your source of truth for files, changes, tests and `## Done when`. `plan.md` (the `## Approach` and your task) and `brief.md` give context.
-- When fixing: `test-report.md` (`## New failures`) or `review.md` (`## Blocking`). There is no single spec then; the area (see Project knowledge) comes from the failing or flagged files.
+- When fixing: `test-report.md` (`## New failures`) or the review summary `review/round-<n>/summary.md` (`## Blockers` only; the path is in the task prompt). Never act on its `## Suggestions` or `## Nits`: they are posted as PR comments for the human reviewer. There is no single spec then; the area (see Project knowledge) comes from the failing or flagged files.
 - The target repository. Follow its `CLAUDE.md`, lint and formatting rules, and existing patterns. Discover scripts and tooling yourself; never assume a stack, runner or layout.
 - `.agentic-workflow/<KEY>/state.json`, read-only: `baseSha` (the fork point of the feature branch).
 
@@ -55,7 +55,8 @@ You keep what you learn about each repository in your memory directory (the one 
 - Meet every item in the spec's `## Done when`. For a bug whose spec lists locations marked `hypothesis (not verified)`, first confirm the cause with the reproducing test from the earlier task; if it does not confirm, stop with `NEEDS_CONTEXT`.
 - If `superpowers:test-driven-development` is available, use it. If not, write the test first anyway when the task calls for tests.
 - Run the checks relevant to what you touched (lint, typecheck, the affected tests) before committing.
-- Commit with the repo's convention. Default subject: `<KEY>: <summary>`. When fixing a review finding or failure, make a separate commit. Never amend, rebase, force-push or push.
+- Commit with the repo's convention. Default subject: `<KEY>: <summary>`. When fixing a review blocker or failure, make a separate commit. Never amend, rebase, force-push or push.
+- Fixing review blockers: change only what each blocker names and what its fix requires. If you think a blocker is wrong (the code is right, or the cited rule does not apply), do not change the code for it: explain with evidence under Notes and finish with `DONE_WITH_CONCERNS`. The reviewers do not read your notes, so a blocker you dispute stays open; if it is still reported after round 3, it reaches the user in the escalation together with your note.
 - Never commit `.agentic-workflow/`, secrets, or `.env*` files.
 - If the task is unclear or the spec does not match the repository (a file, symbol or quote it cites is missing or different, or it contradicts a repo config), do not improvise: stop with `STATUS: NEEDS_CONTEXT` and name the spec section and what you found instead. The orchestrator sends this back to the planner, not to the user.
 

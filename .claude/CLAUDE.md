@@ -5,7 +5,7 @@ This repo is a Claude Code plugin (`agentic-workflow`) and its own single-plugin
 ## Layout
 - `.claude-plugin/plugin.json`, `marketplace.json`: manifests. Keep `version` identical in both and in `package.json`.
 - `.mcp.json`: the plugin's own Atlassian MCP server, a fallback for users without an Atlassian connector. Claude Code suppresses it when a claude.ai connector has the same URL, so never assume its tool prefix.
-- `agents/*.md`: one agent per pipeline stage (`agentic-workflow:<name>`). Never put reference files inside `agents/`: it is scanned recursively and every `.md` there becomes an agent.
+- `agents/*.md`: one agent per pipeline stage (`agentic-workflow:<name>`); the review stage has four read-only reviewers and `review-aggregator`, described in `skills/start/references/review-workflow.md`. Never put reference files inside `agents/`: it is scanned recursively and every `.md` there becomes an agent.
 - `skills/start/SKILL.md`: the orchestrator, `/agentic-workflow:start`. Details live in `skills/start/references/`.
 - `skills/setup/SKILL.md`: `/agentic-workflow:setup`, collects configuration and permissions up front.
 - `README.md`, `CHANGELOG.md`, `LICENSE` (ISC).

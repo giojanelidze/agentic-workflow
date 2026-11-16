@@ -11,7 +11,9 @@ Everything lives in `.agentic-workflow/` of the target repo (excluded from git).
 | `<KEY>/plan.md`, `<KEY>/tasks/<n>-<slug>.md` | `implementation-planner` | plan index and one detailed spec per task (the orchestrator may only delete the specs of tasks that are not done, before a re-plan) |
 | `<KEY>/baseline-report.md`, `test-report.md` | `test-runner` | check results |
 | `<KEY>/implementation.md` | `implementer` | per-task log |
-| `<KEY>/review.md` | `code-reviewer` | findings |
+| `<KEY>/review/round-<n>/diff.patch`, `changed-files.txt`, `delta.patch` | orchestrator | the change handed to the reviewers (the reviewers have no Bash or Write) |
+| `<KEY>/review/round-<n>/<reviewer>.md` | orchestrator | the verbatim reply of one of the four read-only reviewers |
+| `<KEY>/review/round-<n>/summary.md` | `review-aggregator` | merged findings and the verdict of the round |
 | `<KEY>/pr.md` | `pr-publisher` | PR URL, body, CI |
 | `<KEY>/blocked.md` | orchestrator | why a run stopped |
 
@@ -51,9 +53,12 @@ States: `DISCOVERED, ANALYZING, READY, NEEDS_INFO, ANSWERED, REJECTED, HANDED_OF
   "base": "main", "branch": "feat/ABC-123-add-export", "baseSha": "abc1234",
   "tasks": [{ "n": 1, "title": "…", "spec": "tasks/1-add-export.md", "status": "pending | in_progress | done | blocked" }],
   "planAnswers": [{ "id": "P1", "tag": "Tech", "question": "…", "answer": "…", "source": "operator | operator-delegated" }],
-  "counters": { "testLoop": 0, "reviewLoop": 0, "implementerRuns": 0, "needsInputTickets": 0, "planRounds": 0, "planEdits": 0 },
+  "counters": { "testLoop": 0, "implementerRuns": 0, "needsInputTickets": 0, "planRounds": 0, "planEdits": 0 },
   "lastFailureSignature": null,
   "lastPlanQuestions": [],
+  "lastCheckSha": null,
+  "reviewRounds": [{ "n": 1, "sha": "def5678", "verdict": "changes_required" }],
+  "reviewOverride": null,
   "prUrl": null,
   "startedAt": "…", "updatedAt": "…"
 }
@@ -62,3 +67,5 @@ States: `DISCOVERED, ANALYZING, READY, NEEDS_INFO, ANSWERED, REJECTED, HANDED_OF
 `stage`: `analysis, branch, plan, baseline, implement, review, publish, jira, done`.
 
 Planning fields: `planAnswers` holds every question answered in this run (`P<n>` from the planner, `E<n>` for operator edits at checkpoint 1); all of them are passed to each planner run so a question is never asked twice. `planRounds` counts planner re-runs caused by a reopen, a technical question or a spec mismatch (max 3); `planEdits` counts re-runs caused by an edit at checkpoint 1 (max 2). `lastPlanQuestions` keeps the signatures (tag + normalized text) of the previous run's required questions: the same signature twice ends the loop.
+
+Review fields: `lastCheckSha` is HEAD at the last `test-runner` check that returned `PASS`; the review stage starts only when it equals HEAD. `reviewRounds` has one entry per review round (`n`, the reviewed commit `sha`, and the aggregator's `verdict`, `null` until it ran); its length is the round count (max 3) and `delta.patch` of round `n + 1` is taken from the `sha` of round `n`. `reviewOverride` is `publish-with-blockers` when the user chose to publish a draft PR after the escalation, otherwise `null`. See `review-workflow.md`.

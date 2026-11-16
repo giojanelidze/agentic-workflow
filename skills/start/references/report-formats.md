@@ -2,7 +2,7 @@
 
 The orchestrator and agents parse these headings, so keep them exact.
 
-Stage agents (all but `jira-analyst`) end their reply with: `STATUS: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED` plus one sentence.
+Stage agents (all but `jira-analyst` and the four reviewers) end their reply with: `STATUS: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED` plus one sentence. The reviewers reply with their report only (see `review/round-<n>/<reviewer>.md`).
 
 ## jira-analyst result (final message: one JSON block)
 - `{"result":"READY","id","url","brief","confidence"}`
@@ -38,11 +38,75 @@ One `## Task <n>: <title>` section per run: Commit, Changed, Checks run, Knowled
 ## baseline-report.md / test-report.md (test-runner)
 `Status: PASS | FAIL`, `## Commands run`, `## New failures`, `## Pre-existing`. Each failure carries a signature (command + test name or first error line). `FAIL` only with new failures.
 
-## review.md (code-reviewer)
-`Status: APPROVED | CHANGES_REQUESTED`, `## Blocking`, `## Non-blocking`, `## Summary`. Each finding names file:line.
+## review/round-<n>/<reviewer>.md (correctness-, conventions-, security-, performance-reviewer)
+The reviewer's whole reply, saved verbatim by the orchestrator. No `STATUS:` line; a reviewer that cannot work replies with the single line `BLOCKED: <reason>` instead. Exactly this structure:
+
+```markdown
+# <reviewer-name> report
+
+**Round:** <n>
+**Findings:** <x> blocker, <y> suggestion, <z> nit
+
+## Previous blockers
+
+- [resolved | unresolved] <summary> (`path/to/file.ts:42`)
+
+## Findings
+
+### [blocker] <one-line summary>
+
+- **File:** `path/to/file.ts:42`
+- **Reason:** <why this is a problem, in one or two sentences>
+- **Suggested fix:** <a concrete change>
+
+### [suggestion] <one-line summary>
+
+(same three fields)
+```
+
+- `## Previous blockers` exists only in round 2 and up, and then always (`None.` when the reviewer reported no blocker before). It lists each blocker of the previous summary that names this reviewer in `Reported by`, with the summary copied and the current `path:line`.
+- Severities: `blocker` (must be fixed before merge), `suggestion`, `nit`. Findings are ordered blockers first; the `Findings` counts equal the number of `### [blocker|suggestion|nit]` headings under `## Findings`. No findings: the section is the single line `No findings.`
+- Tags follow the severity: `[out-of-focus]` (at most one per report) and `[secret]` (security-reviewer only, on blockers: a credential in the diff). A report never contains a secret value.
+
+## review/round-<n>/summary.md (review-aggregator)
+```markdown
+# Review summary
+
+**Verdict:** approve | changes_required
+**Round:** <n> of 3
+**Totals:** <x> blocker, <y> suggestion, <z> nit
+
+## Blockers (the implementer must fix these)
+
+### <one-line summary>
+
+- **File:** `path/to/file.ts:42`
+- **Reported by:** <reviewer-name>[, <reviewer-name>]
+- **Reason:** ...
+- **Suggested fix:** ...
+
+## Suggestions (PR comments for the human reviewer)
+
+### <one-line summary>
+
+(same four fields)
+
+## Nits (PR comments for the human reviewer)
+
+### <one-line summary>
+
+(same four fields)
+
+## Escalation
+```
+
+- `Verdict` is `changes_required` if at least one blocker exists, otherwise `approve`. Totals count the headings of each section; a previous blocker that is still unresolved counts as a blocker of the round, once.
+- An empty section is the single line `None.`. A heading may begin with tags (`### [secret] <summary>`, `### [out-of-focus] <summary>`) and a carried-over blocker ends with ` (unresolved from round <m>)`, `<m>` being the round that first raised it. The orchestrator stops the run on a `[secret]` blocker.
+- `## Escalation` exists only in round 3 with blockers remaining, as the last section: the open blockers, one line each, for a human.
+- The aggregator ends its reply with `STATUS: DONE | BLOCKED` plus one sentence.
 
 ## pr.md (pr-publisher)
-PR URL (or compare URL), final title and body, CI results.
+PR URL (or compare URL), final title and body, the URL of the review comment (or its text when it could not be posted), CI results.
 
 ## blocked.md (orchestrator)
 What failed, the evidence, what was tried, what the user needs to decide.
