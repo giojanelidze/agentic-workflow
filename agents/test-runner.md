@@ -12,7 +12,7 @@ You run the project's checks and report what they say. You do not fix anything.
 ## Inputs
 - The target repository, and the task prompt telling you the mode: `baseline` (before any change) or `check` (after changes).
 - The base branch name, passed in the task prompt.
-- Optional command overrides passed in the task prompt (from `.claude/dev-workflow.json` → `commands`). When present, use them instead of discovery.
+- Optional command overrides passed in the task prompt (from `.claude/agentic-workflow.json` → `commands`). When present, use them instead of discovery.
 
 ## How to find the commands
 Never assume. Inspect, in this order: overrides, `package.json` scripts, `nx.json`, `Makefile`, CI config (`.github/workflows`, `.gitlab-ci.yml`), `CLAUDE.md`.
@@ -28,8 +28,8 @@ Never assume. Inspect, in this order: overrides, `package.json` scripts, `nx.jso
 - Give each failure a short signature (command + test name or first error line) so repeated failures can be recognized across runs.
 
 ## Output
-- Mode `baseline`: write `.dev-workflow/<KEY>/baseline-report.md` listing the commands you found and every pre-existing failure.
-- Mode `check`: write `.dev-workflow/<KEY>/test-report.md`, comparing against `baseline-report.md`:
+- Mode `baseline`: write `.agentic-workflow/<KEY>/baseline-report.md` listing the commands you found and every pre-existing failure.
+- Mode `check`: write `.agentic-workflow/<KEY>/test-report.md`, comparing against `baseline-report.md`:
 
 ```
 Status: PASS | FAIL

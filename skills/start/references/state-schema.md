@@ -1,11 +1,11 @@
 # State and ownership
 
-Everything lives in `.dev-workflow/` of the target repo (excluded from git). Each file has exactly one writer.
+Everything lives in `.agentic-workflow/` of the target repo (excluded from git). Each file has exactly one writer.
 
 | File | Writer | Holds |
 |---|---|---|
 | `ledger.json`, `lock.json`, `last_run.json`, `pending/` | `jira-analyst` | triage state of tickets, run lease, last run report, questions awaiting answers |
-| `local.json` | `/dev-workflow:setup` | personal Jira settings |
+| `local.json` | `/agentic-workflow:setup` | personal Jira settings |
 | `<KEY>/brief.md` | `jira-analyst` | handoff to the planner |
 | `<KEY>/state.json` | orchestrator | pipeline progress |
 | `<KEY>/plan.md`, `<KEY>/tasks/<n>-<slug>.md` | `implementation-planner` | plan index and one detailed spec per task (the orchestrator may only delete the specs of tasks that are not done, before a re-plan) |

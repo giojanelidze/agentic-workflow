@@ -1,7 +1,7 @@
 {
-  "name": "dev-workflow",
+  "name": "agentic-workflow",
   "version": "0.1.0",
-  "description": "Agent-powered developer workflow: Jira ticket analysis, planning, implementation, tests, code review, and a GitHub pull request, with checkpoints for human approval.",
+  "description": "Agent-powered agentic-workflow: Jira ticket analysis, planning, implementation, tests, code review, and a GitHub pull request, with checkpoints for human approval.",
   "author": {
     "name": "Giorgi Janelidze"
   },
@@ -18,7 +18,7 @@
     "defaultAuto": {
       "type": "boolean",
       "title": "Skip checkpoints by default",
-      "description": "Run /dev-workflow:start without the human checkpoints unless told otherwise. Blocking ticket questions, secret findings and exhausted loop limits still stop the run.",
+      "description": "Run /agentic-workflow:start without the human checkpoints unless told otherwise. Blocking ticket questions, secret findings and exhausted loop limits still stop the run.",
       "default": false
     }
   }

@@ -1,4 +1,4 @@
-# dev-workflow
+# agentic-workflow
 
 A Claude Code plugin that carries a Jira ticket through the whole development workflow with a set of stage agents: pick the next ready ticket, plan, implement, test, review, open a draft GitHub pull request, and record it on the ticket. It pauses for your approval at the points that matter.
 
@@ -19,7 +19,7 @@ Jira board (your assigned tickets)
   -> jira-analyst            PR comment + transition, within your writeMode
 ```
 
-The `start` skill runs in the main conversation and orchestrates the agents. Agents hand work to each other through files in `.dev-workflow/` in the repository you work on (excluded from git automatically). Only the main thread talks to you, and only `jira-analyst` touches Jira and Confluence.
+The `start` skill runs in the main conversation and orchestrates the agents. Agents hand work to each other through files in `.agentic-workflow/` in the repository you work on (excluded from git automatically). Only the main thread talks to you, and only `jira-analyst` touches Jira and Confluence.
 
 ## Prerequisites
 
@@ -32,39 +32,39 @@ The `start` skill runs in the main conversation and orchestrates the agents. Age
 
 ```
 /plugin marketplace add <github-user>/<repo>
-/plugin install dev-workflow@dev-workflow-marketplace
+/plugin install agentic-workflow@agentic-workflow-marketplace
 ```
 
 `/plugin install` opens the plugin in the Discover tab, where you confirm. From a shell:
 
 ```
-claude plugin install dev-workflow --marketplace <github-user>/<repo>
+claude plugin install agentic-workflow --marketplace <github-user>/<repo>
 ```
 
 Local development: `claude --plugin-dir .`
 
 ## First run
 
-1. Run `/dev-workflow:setup` in the repository you work on. It finds your Atlassian server (asking you to pick one if several are connected). If Jira is not authorized yet, it asks you to run `/mcp`, choose that server and authenticate; a browser opens and the token is stored and refreshed for you.
-2. Setup asks once for the Jira site, project and board, the target user, open statuses, issue types, Confluence spaces, and your `writeMode`. It writes `.claude/dev-workflow.json` and `.dev-workflow/local.json` (which holds your personal values, including the server's tool prefix), and registers exact allow/deny permission rules (in your user settings or this repo's `.claude/settings.local.json`, your choice), so later runs do not stop to ask.
-3. Run `/dev-workflow:start`.
+1. Run `/agentic-workflow:setup` in the repository you work on. It finds your Atlassian server (asking you to pick one if several are connected). If Jira is not authorized yet, it asks you to run `/mcp`, choose that server and authenticate; a browser opens and the token is stored and refreshed for you.
+2. Setup asks once for the Jira site, project and board, the target user, open statuses, issue types, Confluence spaces, and your `writeMode`. It writes `.claude/agentic-workflow.json` and `.agentic-workflow/local.json` (which holds your personal values, including the server's tool prefix), and registers exact allow/deny permission rules (in your user settings or this repo's `.claude/settings.local.json`, your choice), so later runs do not stop to ask.
+3. Run `/agentic-workflow:start`.
 
 ## Use
 
 ```
-/dev-workflow:start                  next ready ticket assigned to the configured user
-/dev-workflow:start ABC-123          a specific ticket
-/dev-workflow:start --auto           skip the checkpoints
-/dev-workflow:start --dry-run        analysis only; nothing is written to Jira
-/dev-workflow:start --status         show where every known ticket stands
-/dev-workflow:start ABC-123 --from review
+/agentic-workflow:start                  next ready ticket assigned to the configured user
+/agentic-workflow:start ABC-123          a specific ticket
+/agentic-workflow:start --auto           skip the checkpoints
+/agentic-workflow:start --dry-run        analysis only; nothing is written to Jira
+/agentic-workflow:start --status         show where every known ticket stands
+/agentic-workflow:start ABC-123 --from review
 ```
 
 - By default the run stops at the three checkpoints above.
 - `--auto` skips them. It still stops for blocking ticket questions, required planner questions, a secret found in the diff, an exhausted loop limit, a rebase conflict, or an analyst error.
-- A ticket missing information is parked in `.dev-workflow/pending/<KEY>.md` with specific questions. Answer in the conversation, or edit the file and mark `operator_status: answered`; the next run picks it up first.
+- A ticket missing information is parked in `.agentic-workflow/pending/<KEY>.md` with specific questions. Answer in the conversation, or edit the file and mark `operator_status: answered`; the next run picks it up first.
 - A ticket that already has a PR is never picked up again.
-- Re-running a key offers to resume from `.dev-workflow/<KEY>/state.json`.
+- Re-running a key offers to resume from `.agentic-workflow/<KEY>/state.json`.
 
 ## Write modes
 
@@ -75,13 +75,13 @@ Local development: `claude --plugin-dir .`
 Before it asks you a question, `jira-analyst` tries to answer it from facts:
 
 - **Code** (on by default): it searches the repository you work in (`git grep`) for what the ticket mentions.
-- **Browser** (off by default): with [Claude in Chrome](https://code.claude.com/docs/en/chrome) and a non-production `appUrl` set in `/dev-workflow:setup`, it opens that app read-only to check a repro or the actual behavior. It never types, logs in, submits forms or leaves the allowed origins.
+- **Browser** (off by default): with [Claude in Chrome](https://code.claude.com/docs/en/chrome) and a non-production `appUrl` set in `/agentic-workflow:setup`, it opens that app read-only to check a repro or the actual behavior. It never types, logs in, submits forms or leaves the allowed origins.
 
 A fact counts only with evidence: for every criterion it marks as met, `brief.md` carries an `## Evidence` entry with the source and an exact quote (ticket text, comment id, Confluence page, your own answer, `path:line` and commit, or URL, steps and observed text). The analyst never adds acceptance criteria or repro steps the sources do not state, and before every handoff it re-checks each quote against the repo and the fetched text. Code shows what the app does, never what it should do, so expected behavior, acceptance criteria and design decisions are always asked. Anything it cannot prove (including "could not reproduce") comes back to you as a question that ends with a `Checked:` line saying what was tried.
 
 ## Planning
 
-`implementation-planner` plans only from proof. It re-checks the brief against the repository (every `code` quote in `## Evidence` is searched again, affected paths are confirmed with `git ls-files`) and writes the result with its commands and outputs in `plan.md` `## Validation`. Every file, symbol and reused utility in the plan is cited as `path:line` with a quote; new files are marked `new`; acceptance criteria are the ceiling, and anything else is listed as out of scope. The plan is `plan.md` (approach, traceability from each criterion to its tasks, decisions, risks) plus one detailed spec per task in `.dev-workflow/<KEY>/tasks/`, which the implementer follows.
+`implementation-planner` plans only from proof. It re-checks the brief against the repository (every `code` quote in `## Evidence` is searched again, affected paths are confirmed with `git ls-files`) and writes the result with its commands and outputs in `plan.md` `## Validation`. Every file, symbol and reused utility in the plan is cited as `path:line` with a quote; new files are marked `new`; acceptance criteria are the ceiling, and anything else is listed as out of scope. The plan is `plan.md` (approach, traceability from each criterion to its tasks, decisions, risks) plus one detailed spec per task in `.agentic-workflow/<KEY>/tasks/`, which the implementer follows.
 
 When something is missing it asks instead of guessing:
 
@@ -95,14 +95,14 @@ The same question is never asked twice, and the loops are capped (3 planner re-r
 `implementer` runs on Sonnet (`model: sonnet`: Sonnet 5.5 on the Anthropic API; on Bedrock, Vertex and Foundry the alias maps to an older Sonnet unless you set `ANTHROPIC_DEFAULT_SONNET_MODEL`) and has persistent memory (`memory: user`). Before it changes code it reads the spec, then learns what the spec does not tell it about the repository: structure, architecture, code style and standards, test and build commands, commit convention. It works on any stack; it discovers the manifests and configs that exist. The knowledge is saved globally, one file per repository, under `~/.claude/agent-memory/` (check the agent's subfolder there; the plugin does not depend on its name), so the next task starts informed.
 
 - It learns only what is missing and corrects only what the repository contradicts; there is no periodic re-learning. Each fact carries its source path, and what the agent puts into code or commands it re-verifies in the repo first.
-- It never stores ticket text or keys, `.dev-workflow/` content, secrets or personal data, and nothing from code the feature branch added.
+- It never stores ticket text or keys, `.agentic-workflow/` content, secrets or personal data, and nothing from code the feature branch added.
 - Nothing is written into your repository. To reset what it knows about a repo, delete that repo's file under `repos/` in the memory folder.
 - If auto memory is disabled (`autoMemoryEnabled`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY`) the agent still works, it just saves nothing.
-- `/dev-workflow:setup` adds the permission rules for the memory folder. After updating the plugin, run it again, otherwise memory writes prompt (or are denied in an unattended run).
+- `/agentic-workflow:setup` adds the permission rules for the memory folder. After updating the plugin, run it again, otherwise memory writes prompt (or are denied in an unattended run).
 
 ## Configure
 
-Personal options (`/plugin configure dev-workflow`): `defaultAuto`. Everything else is stored by `/dev-workflow:setup`; see `skills/start/references/config-schema.md`. Without per-repo settings the plugin discovers scripts itself and uses these defaults: branch `feat/ABC-123-short-title`, commit subject `ABC-123: summary`, PR title `[ABC-123] summary`, PR as draft.
+Personal options (`/plugin configure agentic-workflow`): `defaultAuto`. Everything else is stored by `/agentic-workflow:setup`; see `skills/start/references/config-schema.md`. Without per-repo settings the plugin discovers scripts itself and uses these defaults: branch `feat/ABC-123-short-title`, commit subject `ABC-123: summary`, PR title `[ABC-123] summary`, PR as draft.
 
 ## Safety
 
@@ -116,7 +116,7 @@ Personal options (`/plugin configure dev-workflow`): `defaultAuto`. Everything e
 
 ## Roadmap
 
-- `/dev-workflow:address-review`: handle PR review comments.
+- `/agentic-workflow:address-review`: handle PR review comments.
 - `--worktree` isolation.
 - Repository memory for `implementation-planner` and `code-reviewer` too.
 - Plugin evals (`claude plugin eval`): unclear ticket, dirty tree or `main`, resume.

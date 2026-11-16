@@ -1,8 +1,8 @@
 # Configuration
 
-Written by `/dev-workflow:setup`. Every field outside `jira` is optional; defaults apply when missing.
+Written by `/agentic-workflow:setup`. Every field outside `jira` is optional; defaults apply when missing.
 
-## .claude/dev-workflow.json (target repo, team-shared, may be committed)
+## .claude/agentic-workflow.json (target repo, team-shared, may be committed)
 
 ```json
 {
@@ -41,7 +41,7 @@ Written by `/dev-workflow:setup`. Every field outside `jira` is optional; defaul
 - `commands.*` `null` means discover from `package.json`, `nx.json`, `Makefile`, CI config.
 - Defaults: `branchPattern` `<type>/<KEY>-<slug>` (`<type>` from the ticket type: `feat`, `fix`, `chore`), `commitFormat` `<KEY>: <summary>`, `prTitle` `[<KEY>] <summary>`, `prDraft` true, `baseBranch` from `gh repo view --json defaultBranchRef`.
 
-## .dev-workflow/local.json (personal, excluded from git)
+## .agentic-workflow/local.json (personal, excluded from git)
 
 ```json
 { "assigneeAccountId": "5f1…", "operatorLanguage": "ka", "mcpPrefix": "mcp__claude_ai_Atlassian_Rovo__", "browserPrefix": "mcp__claude-in-chrome__" }
@@ -49,7 +49,7 @@ Written by `/dev-workflow:setup`. Every field outside `jira` is optional; defaul
 
 `browserPrefix` (optional) is the tool-name prefix of the Claude in Chrome server, found by setup the same way as `mcpPrefix`.
 
-`assigneeAccountId` is a Jira accountId, never a display name. `mcpPrefix` is the tool-name prefix of the Atlassian server in use: the plugin's own server (`mcp__plugin_dev-workflow_atlassian__`) or a claude.ai connector (`mcp__claude_ai_Atlassian_Rovo__`). It is personal because Claude Code hides the plugin's server when a connector with the same URL exists, so it differs per user. Setup stores it; the analyst reads it from here.
+`assigneeAccountId` is a Jira accountId, never a display name. `mcpPrefix` is the tool-name prefix of the Atlassian server in use: the plugin's own server (`mcp__plugin_agentic-workflow_atlassian__`) or a claude.ai connector (`mcp__claude_ai_Atlassian_Rovo__`). It is personal because Claude Code hides the plugin's server when a connector with the same URL exists, so it differs per user. Setup stores it; the analyst reads it from here.
 
-## Plugin options (`/plugin configure dev-workflow`)
+## Plugin options (`/plugin configure agentic-workflow`)
 `defaultAuto`: skip checkpoints by default.

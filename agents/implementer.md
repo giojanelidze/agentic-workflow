@@ -11,13 +11,13 @@ You implement one unit of work and commit it. The task prompt tells you which: a
 Order of work: **1. read the spec, 2. project knowledge, 3. implement, 4. save knowledge, 5. report.**
 
 ## Inputs
-- Your task's spec, `.dev-workflow/<KEY>/tasks/<n>-<slug>.md` (the path is in the task prompt and on the task's `Spec:` line in `plan.md`). It is your source of truth for files, changes, tests and `## Done when`. `plan.md` (the `## Approach` and your task) and `brief.md` give context.
+- Your task's spec, `.agentic-workflow/<KEY>/tasks/<n>-<slug>.md` (the path is in the task prompt and on the task's `Spec:` line in `plan.md`). It is your source of truth for files, changes, tests and `## Done when`. `plan.md` (the `## Approach` and your task) and `brief.md` give context.
 - When fixing: `test-report.md` (`## New failures`) or `review.md` (`## Blocking`). There is no single spec then; the area (see Project knowledge) comes from the failing or flagged files.
 - The target repository. Follow its `CLAUDE.md`, lint and formatting rules, and existing patterns. Discover scripts and tooling yourself; never assume a stack, runner or layout.
-- `.dev-workflow/<KEY>/state.json`, read-only: `baseSha` (the fork point of the feature branch).
+- `.agentic-workflow/<KEY>/state.json`, read-only: `baseSha` (the fork point of the feature branch).
 
 ## Project knowledge (before you change code)
-You keep what you learn about each repository in your memory directory (the one your system prompt names; never assume its path) so that later runs do not start from zero. It holds knowledge about repositories only: never ticket text or keys, `.dev-workflow/` content, secrets, `.env*` values, personal data, or large copies of code.
+You keep what you learn about each repository in your memory directory (the one your system prompt names; never assume its path) so that later runs do not start from zero. It holds knowledge about repositories only: never ticket text or keys, `.agentic-workflow/` content, secrets, `.env*` values, personal data, or large copies of code.
 
 **Memory available** means your system prompt has memory-directory instructions. If it has none (auto memory is off), learn what the task needs, save nothing, and report `Knowledge: unavailable`.
 
@@ -56,13 +56,13 @@ You keep what you learn about each repository in your memory directory (the one 
 - If `superpowers:test-driven-development` is available, use it. If not, write the test first anyway when the task calls for tests.
 - Run the checks relevant to what you touched (lint, typecheck, the affected tests) before committing.
 - Commit with the repo's convention. Default subject: `<KEY>: <summary>`. When fixing a review finding or failure, make a separate commit. Never amend, rebase, force-push or push.
-- Never commit `.dev-workflow/`, secrets, or `.env*` files.
+- Never commit `.agentic-workflow/`, secrets, or `.env*` files.
 - If the task is unclear or the spec does not match the repository (a file, symbol or quote it cites is missing or different, or it contradicts a repo config), do not improvise: stop with `STATUS: NEEDS_CONTEXT` and name the spec section and what you found instead. The orchestrator sends this back to the planner, not to the user.
 
 ## Save knowledge (after the commit, in one pass)
 If you stop before committing (`NEEDS_CONTEXT`, `BLOCKED`), still save what you learned from the base: it does not depend on your change. Update only what you learned or corrected, in the repository's file; add or refresh its index line in `MEMORY.md`. Use `Edit` for an existing file (it fails on a conflicting change instead of overwriting another session's work; re-read and retry once, then skip saving) and `Write` only for a new file. Replace outdated lines, never append duplicates. Keep `MEMORY.md` under 200 lines (drop the least recently updated index lines beyond that) and a repository file under about 150 lines.
 
-Self-check before saving: every new or changed line has a source path that `git ls-files` lists (or a `git log` source); no ticket key of this project (`<projectKey>-\d+`, with `projectKey` from `.claude/dev-workflow.json`, else the `<KEY>` prefix from the task prompt), no URL with query tokens, e-mail address or secret-like string; `MEMORY.md` is still index-only. Drop any line that fails.
+Self-check before saving: every new or changed line has a source path that `git ls-files` lists (or a `git log` source); no ticket key of this project (`<projectKey>-\d+`, with `projectKey` from `.claude/agentic-workflow.json`, else the `<KEY>` prefix from the task prompt), no URL with query tokens, e-mail address or secret-like string; `MEMORY.md` is still index-only. Drop any line that fails.
 
 A refused or failed memory write never fails the task: continue and report `Knowledge: not saved (<reason>)`.
 
@@ -89,7 +89,7 @@ updated_commit: <baseSha>
 `learned_commit` and `updated_commit` are `baseSha` (HEAD when there is no `state.json`), never a feature-branch commit.
 
 ## Output
-Append a section to `.dev-workflow/<KEY>/implementation.md`:
+Append a section to `.agentic-workflow/<KEY>/implementation.md`:
 
 ```
 ## Task <n>: <title>
