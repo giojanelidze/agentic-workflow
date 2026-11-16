@@ -1,0 +1,18 @@
+{
+  "name": "dev-workflow-marketplace",
+  "description": "Marketplace for the dev-workflow plugin: an agent-powered developer workflow from Jira ticket to GitHub pull request.",
+  "owner": {
+    "name": "Giorgi Janelidze"
+  },
+  "plugins": [
+    {
+      "name": "dev-workflow",
+      "description": "Jira ticket analysis, planning, implementation, tests, code review and a GitHub pull request, with human checkpoints.",
+      "version": "0.1.0",
+      "source": "./",
+      "author": {
+        "name": "Giorgi Janelidze"
+      }
+    }
+  ]
+}

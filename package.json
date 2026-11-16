@@ -1,0 +1,11 @@
+{
+  "name": "developer-workflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An autonomous, agent-powered workflow that covers the entire development lifecycle, from analyzing Jira tasks to implementing solutions, running tests, reviewing code, and creating pull requests, with minimal human intervention.",
+  "scripts": {
+    "test": "claude plugin validate . --strict"
+  },
+  "author": "Giorgi Janelidze",
+  "license": "ISC"
+}
