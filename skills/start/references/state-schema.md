@@ -15,6 +15,8 @@ Everything the pipeline produces lives in the run folder `State`, **outside the 
 <repo>/.claude/agentic-workflow.json   the repository config, only when the user chose to share it with the team (team mode)
 ```
 
+On Kiro the same layout lives under `~/.kiro/agentic-workflow/` (`aw-paths --tool kiro`), with two more folders: `hooks-alive/` (one empty file per Kiro session, written by the guard's `SessionStart` hook; the preflight checks it) and `memory/implementer/` (the implementer's repository knowledge). The permission rules are `fs_write` on `state/**` and `memory/**` only, written by `bin/kiro-permissions`.
+
 The run files have a tree of their own on purpose: the one permission rule that lets agents write them, `Edit(~/.claude/agentic-workflow/state/**)`, can then never match `local.json` or `config.json`, whatever a repository or an owner is called (a layout like `repos/<host>/<owner>/<repo>/state/` would be matched by `repos/**/state/**` for a repository named `state`).
 
 Which config applies (`mode`) is derived from which files exist: the repository file means `team`, `config.json` means `personal`, both is a `conflict` that setup resolves, neither is `none`. Two clones of one repository share `State`; `lock.json` allows one run at a time per repository, and a ticket whose `state.json` names a branch missing in this clone is resumed only after the user confirms.

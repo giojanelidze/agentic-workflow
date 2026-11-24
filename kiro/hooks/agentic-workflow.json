@@ -1,0 +1,22 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "agentic-workflow-guard",
+      "description": "Blocks the Jira write tools of the plugin's Atlassian server when the repository's write mode (or what the user accepted in setup) does not reach them.",
+      "trigger": "PreToolUse",
+      "matcher": "^mcp_agentic_workflow_atlassian_(editjiraissue|addcommenttojiraissue|transitionjiraissue)$",
+      "action": { "type": "command", "command": "~/.kiro/agentic-workflow-plugin/hooks/guard --tool kiro" },
+      "timeout": 10,
+      "enabled": true
+    },
+    {
+      "name": "agentic-workflow-alive",
+      "description": "Leaves a marker for the session so that the start preflight can tell that hooks run (a workspace that is not trusted runs none).",
+      "trigger": "SessionStart",
+      "action": { "type": "command", "command": "~/.kiro/agentic-workflow-plugin/hooks/guard --tool kiro --marker" },
+      "timeout": 10,
+      "enabled": true
+    }
+  ]
+}

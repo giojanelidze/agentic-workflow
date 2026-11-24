@@ -1,6 +1,6 @@
 # agentic-workflow
 
-A Claude Code plugin that carries a Jira ticket through the whole development workflow with a set of stage agents: pick the next ready ticket, plan, implement, test, review, open a draft GitHub pull request, and record it on the ticket. It pauses for your approval at the points that matter.
+A Claude Code plugin (it also runs in Kiro CLI, see below) that carries a Jira ticket through the whole development workflow with a set of stage agents: pick the next ready ticket, plan, implement, test, review, open a draft GitHub pull request, and record it on the ticket. It pauses for your approval at the points that matter.
 
 ```
 Jira board (your assigned tickets)
@@ -25,7 +25,7 @@ The `start` skill runs in the main conversation and orchestrates the agents. Age
 
 ## Prerequisites
 
-- Claude Code with plugin support.
+- Claude Code with plugin support, or Kiro CLI 3.x (see Kiro CLI below).
 - `gh` CLI, logged in with an account that can write to the repository (`gh auth login`). Setup binds the repository to one of the logged-in accounts and every gh call then runs as that account through the plugin's `gh-as` wrapper, without ever changing gh's active account, so other terminals are not affected. Without `gh`, or without that binding, the run still pushes and writes the PR text to `pr.md`.
 - An Atlassian account with access to your Jira site. Jira is reached through an Atlassian MCP server: either your claude.ai Atlassian connector (if you have one) or the server this plugin ships. Claude Code hides the plugin's server when a connector with the same URL exists, so setup finds whichever is available and stores its tool prefix. You authorize once in the browser; the token is stored and refreshed for you.
 - Optional, for picture analysis: an Atlassian API token of your own (setup stores it in the macOS keychain, never in a file) and `ffmpeg` for screen recordings (`brew install ffmpeg`; screenshots work without it). macOS only in this version.
@@ -45,6 +45,37 @@ claude plugin install agentic-workflow --marketplace <github-user>/<repo>
 ```
 
 Local development: `claude --plugin-dir .`
+
+## Kiro CLI
+
+The same workflow runs in [Kiro CLI](https://kiro.dev/cli/) 3.x (the V3 engine) from the same checkout; Claude Code is unchanged. The Kiro files are in `kiro/`, installed by `bin/kiro-install`. Built and checked against kiro-cli 3.5: the agents, the prompts, the guard hook (a block and a pass, through a server named like the real one), the permission block and the install were run headless; the Atlassian sign-in through `/mcp` and the approval prompts in the interactive UI need a live run (`tests/live-smoke.md`, Stage 5).
+
+**Install** (from a clone of this repository; run it again after every `git pull`):
+
+```
+bin/kiro-install
+```
+
+It links the plugin folder to `~/.kiro/agentic-workflow-plugin`, links the 12 agents into `~/.kiro/agents/`, copies the three prompts and the guard hook into `~/.kiro/prompts/` and `~/.kiro/hooks/` (Kiro skips links there, so these are copies: `bin/kiro-install --check` says when they are out of date) and, after a yes, adds the Atlassian server `agentic-workflow-atlassian` (`https://mcp.atlassian.com/v2/mcp`) to Kiro's global MCP settings. `--uninstall` takes it all out again. Nothing is written into any repository.
+
+Then run `bin/kiro-permissions apply` once (`print` shows the rules first). Without it Kiro asks before every read of the plugin's own files and before every `aw-paths` call; setup adds your GitHub account and the picture rules to the same block later.
+
+**Run**
+1. In the repository: `kiro-cli --agent agentic-workflow`, and trust the workspace. Kiro runs hooks, workspace agents and MCP servers only in a trusted workspace; without trust the guard is silent, and `/agentic-workflow-start` stops when it notices.
+2. `/mcp`, choose `agentic-workflow-atlassian` and sign in.
+3. `/agentic-workflow-setup` once per repository, then `/agentic-workflow-start` or `/agentic-workflow-start ABC-123`, and `/agentic-workflow-media ABC-123`. These prompts take the place of the `/agentic-workflow:...` commands.
+4. Kiro's own tools may not write `~/.kiro/settings/`, so setup cannot write Kiro's permission file. After each stage it prints the `! ~/.kiro/agentic-workflow-plugin/bin/kiro-permissions apply ...` command with your values, which you run. It adds allow rules only: the read tools of the Atlassian server, the exact script commands, reads of the plugin folder and of `~/.kiro/agentic-workflow/`, writes of the run files and of the implementer's memory, and starting the plugin's agents. Never a deny rule, never a Jira write tool. `kiro-permissions print` shows the rules first and `remove` takes them out; the block is one for the computer, so setting up a second repository keeps what the first one added.
+
+**Where things live.** The team config is the same file for both tools (`<repo>/.claude/agentic-workflow.json`). Your personal values, the run files (ledger, briefs, plans, reports) and the implementer's memory are separate per tool: `~/.kiro/agentic-workflow/...` on Kiro and `~/.claude/agentic-workflow/...` in Claude Code. Someone who uses both tools on one repository therefore has two ledgers, and with `writeMode` `none` nothing on the ticket tells one tool that the other has picked it up. The Atlassian API token for picture analysis is one keychain item for both tools: `jira-attachment logout` on one removes it for both.
+
+**What is different on Kiro**
+- **No browser investigation** (Claude in Chrome does not exist there). Setup never touches the `jira.investigation` settings of a shared config.
+- **The guard only blocks.** Kiro's hooks do not say which agent made a call, so the guard cannot tell the analyst from anyone else. It blocks a Jira write tool of the plugin's server when the repository's write mode (or what you accepted in setup) does not reach it, and whenever it cannot judge (a repository that is not set up, a conflict, an unreadable file, any error). Inside the mode it says nothing, so **Kiro shows its own approval prompt for every Jira write** and `--auto` is not unattended for those. The plugin's server is meant for this workflow: use another server for Jira writes of your own.
+- Questions are plain-text messages with numbered options (Kiro has no question dialog), and authorizations are `/mcp` and `! gh auth login` followed by writing `done`: nothing runs in the background and wakes the agent.
+- **Kiro's shell matcher does not see redirects.** An allowed command can have its output redirected to a file without a prompt (`... > file`), and a rule ending in `*` allows that. The agents are told never to redirect, chain or background a command, and the fixed commands have exact rules without `*`, but this is Kiro's behavior and applies to its own read-only `git` list too. Keep your own allow rules narrow.
+- Kiro refuses any shell command that contains `--host <word>` (it takes it for a dev server). `aw-paths` and the guard therefore take `--tool kiro`, and `gh-as` accepts `--hostname` as another spelling of `--host`.
+- Every Kiro agent has the built-in `user_input` tool and it cannot be switched off; the plugin's agents are told never to call it.
+- Approve the writes of the configuration files once and never choose "always allow" for them (see Storage).
 
 ## First run
 
@@ -158,7 +189,8 @@ Personal options (`/plugin configure agentic-workflow`): `defaultAuto`. Everythi
 - Ticket, comment, Confluence, code and web page text is treated as data, never as instructions.
 - The browser, when enabled, is read-only and limited to the origins you allow; the guard allows the analyst only the read tools, and only in repositories where you enabled it.
 - Jira writes go through one agent, within the `writeMode` you chose, and are enforced per repository by the plugin's guard hook, never by user-level deny rules. If you disable hooks (`disableAllHooks`), Jira writes and the browser fall back to asking for permission on every call.
-- Setup writes only `allow` rules, and only for what is the same in every repository.
+- Setup writes only `allow` rules, and only for what is the same in every repository. On Kiro it writes none itself: it prints a `kiro-permissions` command for you to run.
+- On Kiro the guard only blocks (it cannot tell which agent calls), so Jira writes inside your write mode still show Kiro's approval prompt; see Kiro CLI.
 - The plugin stores no tokens or secrets in files; authorization is handled by Claude Code. The one exception is opt-in: with picture analysis on, your Atlassian API token lives in the macOS keychain (stored by `jira-attachment login`). Any program that runs on your computer as you can read a keychain item that `security` created, including the commands a run executes, so prefer a token with scopes (read-only) when your Atlassian plan offers it, and remove it any time: `jira-attachment logout --email <you>` (that script is on the Bash tool's `PATH` only while the plugin is enabled), or in any terminal `security delete-generic-password -s agentic-workflow-atlassian -a <you>`; revoke the token itself on the Atlassian account's API-token page.
 
 ## Roadmap

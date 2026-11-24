@@ -1,11 +1,16 @@
 #!/bin/sh
-# guard: PreToolUse hook of agentic-workflow. It decides, per repository, what the jira-analyst
-# may do with the Jira write tools and with the browser. It replaces user-level permission
-# "deny" rules, which would apply to every repository and every session at once.
+# guard: PreToolUse hook of agentic-workflow. It decides, per repository, what the jira-analyst may do
+# with the Jira write tools and with the browser. It replaces user-level permission "deny" rules, which
+# would apply to every repository and every session at once.
 #
-# It only ever speaks about calls made by the agent `agentic-workflow:jira-analyst` (the hook
-# input carries `agent_type`); every other caller gets no answer (exit 0, no output), so the
-# normal permission flow applies to the main thread and to every other agent.
+# usage (Claude Code, hooks/hooks.json):   guard                       the hook input comes on stdin
+#       (Kiro, kiro/hooks/*.json):         guard --tool kiro           the hook input comes on stdin
+#                                          guard --tool kiro --marker       SessionStart: note that hooks run
+#                                          guard --tool kiro --check-alive  print alive|off for this session
+#
+# Claude Code. It only ever speaks about calls made by the agent `agentic-workflow:jira-analyst` (the hook
+# input carries `agent_type`); every other caller gets no answer (exit 0, no output), so the normal
+# permission flow applies to the main thread and to every other agent.
 #
 # For the analyst it answers "allow" or "deny" and never "ask":
 #   * editJiraIssue / addCommentToJiraIssue / transitionJiraIssue: allowed when the Atlassian
@@ -16,15 +21,97 @@
 #   * Claude in Chrome: only when the repository enables the browser (`allowedOrigins` in the config, at
 #     least one of them also listed in `acceptedOrigins` of local.json, and `browserPrefix` in local.json)
 #     and only the read tools below; everything else is denied. The browser then works on that overlap only.
-# Anything it cannot read or understand is denied (fail closed). Plain POSIX sh; no jq or python.
+# Anything it cannot read or understand is denied (fail closed).
+#
+# Kiro. Its hook input names no agent and a global hook fires for every caller, so the guard cannot tell the
+# analyst from anyone else. It therefore never answers "allow" (Kiro keeps asking the user inside the mode)
+# and only blocks: exit 2 with the reason on stderr, which is the one thing Kiro treats as a block (any other
+# failure, a timeout or an untrusted workspace lets the call through to Kiro's own prompt). It judges only the
+# three Jira write tools of the server this repository is bound to (`mcpPrefix` in the Kiro local.json is
+# `<server>::`; the hook sees the tool as `mcp_<server>_<tool>`, lower case, `-` turned into `_`). Anything
+# else gets no opinion; every error, a repository that is not set up and a conflict are blocked. The same
+# effective write mode applies. Kiro has no browser tools.
+#
+# Plain POSIX sh; no jq or python.
 
 here="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || here=""
 
+hostmode=claude
+marker=0
+check_alive=0
+decided=0
+
+bad_usage() {
+  decided=1
+  echo "agentic-workflow guard: usage: guard [--tool kiro [--marker | --check-alive]]" >&2
+  exit 2
+}
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tool) [ $# -ge 2 ] || bad_usage; hostmode="$2"; shift 2 ;;
+    --marker) marker=1; shift ;;
+    --check-alive) check_alive=1; shift ;;
+    *) bad_usage ;;
+  esac
+done
+case "$hostmode" in
+  claude) [ "$marker" = 0 ] && [ "$check_alive" = 0 ] || bad_usage ;;
+  kiro) [ "$marker" = 0 ] || [ "$check_alive" = 0 ] || bad_usage ;;
+  *) bad_usage ;;
+esac
+
+if [ "$hostmode" = kiro ]; then
+  # Fail closed: a crash or a signal blocks the call instead of letting it through.
+  trap 'if [ "$decided" != 1 ]; then echo "agentic-workflow: the guard failed, so this call is blocked." >&2; exit 2; fi' EXIT
+  trap 'exit 2' HUP INT TERM
+  setup_cmd="/agentic-workflow-setup"
+else
+  setup_cmd="/agentic-workflow:setup"
+fi
+
+quiet() { decided=1; exit 0; }
 emit() {
+  decided=1
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"%s","permissionDecisionReason":"%s"}}\n' "$1" "$2"
   exit 0
 }
-deny() { emit deny "agentic-workflow: $1"; }
+deny() {
+  decided=1
+  if [ "$hostmode" = kiro ]; then
+    printf 'agentic-workflow: %s\n' "$1" >&2
+    exit 2
+  fi
+  emit deny "agentic-workflow: $1"
+}
+# Inside the allowed mode: Claude gets an explicit allow, Kiro no answer (it keeps asking).
+permit() {
+  if [ "$hostmode" = kiro ]; then quiet; fi
+  emit allow "$1"
+}
+
+# --- Kiro: the marker that shows the hooks run in this session ------------------------------------
+# A workspace that is not trusted runs no hook at all, so the guard would be silent. SessionStart leaves a
+# file named after the session; the start preflight asks `--check-alive` and stops when it is missing.
+if [ "$marker" = 1 ]; then
+  cat >/dev/null 2>&1
+  decided=1
+  sid="${KIRO_SESSION_ID:-}"
+  case "$sid" in ''|*[!A-Za-z0-9_-]*) exit 0 ;; esac
+  [ -n "${HOME:-}" ] || exit 0
+  dir="$HOME/.kiro/agentic-workflow/hooks-alive"
+  if mkdir -p "$dir" 2>/dev/null; then
+    : > "$dir/$sid" 2>/dev/null
+    find "$dir" -type f -mtime +7 -exec rm -f {} + 2>/dev/null
+  fi
+  exit 0
+fi
+if [ "$check_alive" = 1 ]; then
+  decided=1
+  sid="${KIRO_SESSION_ID:-}"
+  case "$sid" in ''|*[!A-Za-z0-9_-]*) echo off; exit 0 ;; esac
+  if [ -n "${HOME:-}" ] && [ -f "$HOME/.kiro/agentic-workflow/hooks-alive/$sid" ]; then echo alive; else echo off; fi
+  exit 0
+fi
 
 # --- read the hook input ------------------------------------------------------------------
 # A small JSON tokenizer that returns only string values found at depth 1 of the top-level object
@@ -81,17 +168,32 @@ done <<EOF
 $parsed
 EOF
 
-# Not the analyst: no opinion.
-[ "$agent_type" = "agentic-workflow:jira-analyst" ] || exit 0
+# Claude: not the analyst, no opinion. (Kiro names no agent; see the header.)
+if [ "$hostmode" = claude ]; then
+  [ "$agent_type" = "agentic-workflow:jira-analyst" ] || quiet
+fi
 
 [ "$flagged" = 0 ] || deny "the hook input could not be read safely."
 [ -n "$tool_name" ] || deny "the hook input has no tool name."
+
+# Kiro: only the three Jira write tools are ours; anything else gets no opinion, whether or not the
+# repository is set up. (Claude decides by tool name further down, after it found the repository.)
+need=0; short=""; browser=0
+if [ "$hostmode" = kiro ]; then
+  case "$tool_name" in
+    mcp_*_editjiraissue)         short=editjiraissue; need=1 ;;
+    mcp_*_addcommenttojiraissue) short=addcommenttojiraissue; need=2 ;;
+    mcp_*_transitionjiraissue)   short=transitionjiraissue; need=3 ;;
+    *) quiet ;;
+  esac
+fi
+
 [ -n "$cwd" ] || deny "the hook input has no working directory."
 
 # --- find this repository's files -----------------------------------------------------------
 aw="$here/../bin/aw-paths"
 [ -x "$aw" ] || deny "bin/aw-paths is missing from the plugin."
-paths="$("$aw" --cwd "$cwd" 2>/dev/null)" || deny "cannot tell which repository this is (run /agentic-workflow:setup)."
+paths="$("$aw" --tool "$hostmode" --cwd "$cwd" 2>/dev/null)" || deny "cannot tell which repository this is (run $setup_cmd)."
 
 mode=""; config=""; local_file=""
 while IFS= read -r line; do
@@ -106,11 +208,11 @@ EOF
 
 case "$mode" in
   team|personal) ;;
-  conflict) deny "this repository has a team config and a personal config (run /agentic-workflow:setup)." ;;
-  *)        deny "this repository is not set up (run /agentic-workflow:setup)." ;;
+  conflict) deny "this repository has a team config and a personal config (run $setup_cmd)." ;;
+  *)        deny "this repository is not set up (run $setup_cmd)." ;;
 esac
-[ -r "$config" ] || deny "the repository config cannot be read (run /agentic-workflow:setup)."
-[ -r "$local_file" ] || deny "the personal config cannot be read (run /agentic-workflow:setup)."
+[ -r "$config" ] || deny "the repository config cannot be read (run $setup_cmd)."
+[ -r "$local_file" ] || deny "the personal config cannot be read (run $setup_cmd)."
 
 # --- tiny readers for the two config files (written by setup, one key per line) --------------
 # String value of a key, or nothing.
@@ -133,33 +235,44 @@ level() {
 }
 
 # --- decide ------------------------------------------------------------------------------------
-need=0; short=""; browser=0
-case "$tool_name" in
-  *__editJiraIssue)         short=editJiraIssue; need=1 ;;
-  *__addCommentToJiraIssue) short=addCommentToJiraIssue; need=2 ;;
-  *__transitionJiraIssue)   short=transitionJiraIssue; need=3 ;;
-  mcp__claude-in-chrome__*) browser=1 ;;
-  *) exit 0 ;;
-esac
+if [ "$hostmode" = claude ]; then
+  case "$tool_name" in
+    *__editJiraIssue)         short=editJiraIssue; need=1 ;;
+    *__addCommentToJiraIssue) short=addCommentToJiraIssue; need=2 ;;
+    *__transitionJiraIssue)   short=transitionJiraIssue; need=3 ;;
+    mcp__claude-in-chrome__*) browser=1 ;;
+    *) quiet ;;
+  esac
+fi
 
 if [ "$browser" = 0 ]; then
   prefix="${tool_name%"$short"}"
-  [ "$prefix" = "$(jget "$local_file" mcpPrefix)" ] ||
+  stored="$(jget "$local_file" mcpPrefix)"
+  if [ "$hostmode" = kiro ]; then
+    # `mcpPrefix` is `<server>::` on Kiro; the hook sees mcp_<server>_ with the server name folded the way
+    # Kiro folds it (lower case, whitespace and "-" become "_", every other character is dropped).
+    case "$stored" in
+      ?*::) ;;
+      *) deny "this repository is not bound to an Atlassian server for Kiro, so $short is blocked (run $setup_cmd)." ;;
+    esac
+    stored="mcp_$(printf '%s' "${stored%::}" | tr 'A-Z' 'a-z' | tr ' -' '__' | tr -cd 'a-z0-9_')_"
+  fi
+  [ "$prefix" = "$stored" ] ||
     deny "this repository is bound to another Atlassian connector, so $short is not allowed."
   cfg_level="$(level "$(jget "$config" writeMode)")"
   acc_level="$(level "$(jget "$local_file" acceptedWriteMode)")"
   eff="$cfg_level"
   [ "$acc_level" -lt "$eff" ] && eff="$acc_level"
   if [ "$eff" -ge "$need" ]; then
-    emit allow "agentic-workflow: the write mode of this repository permits $short."
+    permit "agentic-workflow: the write mode of this repository permits $short."
   fi
   if [ "$cfg_level" -gt "$acc_level" ]; then
-    deny "the config asks for a wider write mode than you accepted in setup, so $short is blocked (run /agentic-workflow:setup --reconfigure jira)."
+    deny "the config asks for a wider write mode than you accepted in setup, so $short is blocked (run $setup_cmd --reconfigure jira)."
   fi
   deny "the write mode of this repository does not permit $short."
 fi
 
-# Browser.
+# Browser (Claude Code only).
 prefix="mcp__claude-in-chrome__"
 short="${tool_name#"$prefix"}"
 enabled=0
@@ -177,7 +290,7 @@ fi
 [ "$enabled" = 1 ] || deny "the browser is not enabled for this repository, so $short is blocked."
 case "$short" in
   tabs_context_mcp|tabs_create_mcp|tabs_close_mcp|navigate|get_page_text|read_page|find|computer)
-    emit allow "agentic-workflow: $short is one of the read-only browser tools of the analyst." ;;
+    permit "agentic-workflow: $short is one of the read-only browser tools of the analyst." ;;
   *)
     deny "$short is not one of the read-only browser tools of the analyst." ;;
 esac

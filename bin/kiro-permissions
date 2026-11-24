@@ -1,0 +1,237 @@
+#!/bin/sh
+# kiro-permissions: add or remove the allow rules of agentic-workflow in Kiro's global permission file
+# (~/.kiro/settings/permissions.yaml).
+#
+# usage: kiro-permissions print|apply [--github <account>@<host>]... [--pictures | --no-pictures]
+#                                     [--server <name>] [--plugin-dir <dir>] [--file <path>]
+#        kiro-permissions remove [--file <path>]
+#
+# Kiro's own file tool may not write ~/.kiro/settings/, so the user runs this script (in Kiro: `! <path> apply ...`).
+# `print` shows the rules and changes nothing. `apply` merges them as one marked block inside the top-level
+# `rules:` list and keeps everything else; run again, it replaces its own block. `remove` takes the block out
+# again (and deletes the file when the script created it and nothing else is left). A copy of an existing file
+# is kept once as <file>.agentic-workflow.bak.
+# The block is one for the whole computer, like the Claude rules in ~/.claude/settings.json: `apply` keeps the
+# gh accounts and the picture rules that the block already has and adds what it is given, so setting up a
+# second repository never drops the first. --no-pictures takes the picture rules out; `remove` and `apply` again
+# starts from nothing.
+#
+# Only allow rules, and only what is the same in every repository or is needed to run the workflow:
+#   mcp       the read tools of the Atlassian server (never a write tool)
+#   shell     aw-paths and the guard's alive check (exact commands), read-only gh-as commands (written with
+#             --hostname: Kiro refuses a command that contains `--host <word>`) of the given
+#             accounts, and with --pictures jira-attachment get|check and media-prep
+#   fs_read   this plugin folder (its real path: Kiro resolves symlinks before it matches) and
+#             ~/.kiro/agentic-workflow/**
+#   fs_write  ~/.kiro/agentic-workflow/state/** and memory/** only: never repos/** (config.json and local.json)
+#             and never the plugin folder
+#   subagent  the agents of this plugin (the folder kiro/agents)
+# Never a deny rule, a rule for a Jira write tool, a browser rule or a rule for `jira-attachment login`.
+# Kiro's shell matcher does not see redirects (`> file`) after an allowed command, so a rule ending in `*`
+# lets that command's output be redirected anywhere; the exact commands above have no `*`.
+#
+# Exit codes: 0 ok, 2 bad usage, 3 the file has a layout this script will not edit (the rules are printed
+# instead), 4 the plugin folder has no kiro/agents. Plain POSIX sh; no jq, python or yq.
+
+usage() {
+  echo "usage: kiro-permissions print|apply [--github <account>@<host>]... [--pictures | --no-pictures] [--server <name>] [--plugin-dir <dir>] [--file <path>]" >&2
+  echo "       kiro-permissions remove [--file <path>]" >&2
+  exit 2
+}
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift
+case "$cmd" in print|apply|remove) ;; *) usage ;; esac
+
+server="agentic-workflow-atlassian"
+plugin_dir=""
+file=""
+pictures=0
+nopics=0
+github=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --server)     [ $# -ge 2 ] || usage; server="$2"; shift 2 ;;
+    --plugin-dir) [ $# -ge 2 ] || usage; plugin_dir="$2"; shift 2 ;;
+    --file)       [ $# -ge 2 ] || usage; file="$2"; shift 2 ;;
+    --pictures)   pictures=1; shift ;;
+    --no-pictures) nopics=1; shift ;;
+    --github)     [ $# -ge 2 ] || usage; github="$github
+$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+
+# A word that ends up inside a rule: letters, digits, dot, underscore and hyphen, no leading hyphen.
+safe() {
+  case "$1" in
+    ''|-*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+if [ -z "$file" ]; then
+  [ -n "${HOME:-}" ] || { echo "kiro-permissions: HOME is not set" >&2; exit 2; }
+  file="$HOME/.kiro/settings/permissions.yaml"
+fi
+
+BEGIN="# >>> agentic-workflow (managed by bin/kiro-permissions; take it out with: kiro-permissions remove)"
+END="# <<< agentic-workflow"
+
+# The file without our block.
+stripped() {
+  awk -v b="# >>> agentic-workflow" -v e="# <<< agentic-workflow" '
+    index($0, b) { skip = 1; next }
+    skip && index($0, e) { skip = 0; next }
+    !skip { print }
+  ' "$1"
+}
+
+# --- build the block -------------------------------------------------------------------------
+build() { # indent-string
+  i="$1"; j="$i  "; k="$i    "
+  PLUG='~/.kiro/agentic-workflow-plugin'
+  line() { printf '%s%s\n' "$1" "$2"; }
+  item() { printf '%s- "%s"\n' "$k" "$1"; }
+  line "$i" "$BEGIN"
+
+  line "$i" "- capability: mcp"
+  line "$j" "effect: allow"
+  line "$j" "match:"
+  for t in atlassianUserInfo getAccessibleAtlassianResources searchJiraIssuesUsingJql getJiraIssue \
+           getJiraIssueRemoteIssueLinks getTransitionsForJiraIssue searchConfluenceUsingCql getConfluencePage; do
+    item "$server/$t"
+  done
+
+  line "$i" "- capability: shell"
+  line "$j" "effect: allow"
+  line "$j" "match:"
+  item "$PLUG/bin/aw-paths --tool kiro"
+  item "$PLUG/hooks/guard --tool kiro --check-alive"
+  printf '%s\n' "$github" | while IFS= read -r g; do
+    [ -n "$g" ] || continue
+    acct="${g%@*}"; ghost="${g#*@}"
+    for sub in "repo view" "pr list" "pr view" "pr checks"; do
+      item "$PLUG/bin/gh-as --account $acct --hostname $ghost $sub *"
+    done
+  done
+  if [ "$pictures" = 1 ]; then
+    item "$PLUG/bin/jira-attachment get *"
+    item "$PLUG/bin/jira-attachment check *"
+    item "$PLUG/bin/media-prep *"
+  fi
+
+  line "$i" "- capability: fs_read"
+  line "$j" "effect: allow"
+  line "$j" "match:"
+  item "$plugin_dir/**"
+  item "~/.kiro/agentic-workflow/**"
+
+  line "$i" "- capability: fs_write"
+  line "$j" "effect: allow"
+  line "$j" "match:"
+  item "~/.kiro/agentic-workflow/state/**"
+  item "~/.kiro/agentic-workflow/memory/**"
+
+  line "$i" "- capability: subagent"
+  line "$j" "effect: allow"
+  line "$j" "match:"
+  for agent_file in "$plugin_dir"/kiro/agents/*.md; do
+    agent_name="${agent_file##*/}"; item "${agent_name%.md}"
+  done
+
+  line "$i" "$END"
+}
+
+spaces() { # n -> n spaces
+  s=""; n="$1"
+  while [ "$n" -gt 0 ]; do s="$s "; n=$((n - 1)); done
+  printf '%s' "$s"
+}
+
+# --- remove ----------------------------------------------------------------------------------
+if [ "$cmd" = remove ]; then
+  if [ ! -f "$file" ]; then echo "kiro-permissions: $file does not exist; nothing to remove"; exit 0; fi
+  if ! grep -q "# >>> agentic-workflow" "$file"; then echo "kiro-permissions: no agentic-workflow block in $file"; exit 0; fi
+  tmp="$(mktemp "$file.XXXXXX")" || exit 1
+  stripped "$file" > "$tmp"
+  # nothing but the bare `rules:` key (and blank or comment lines) is left: the script created the file
+  if [ -z "$(grep -v -E '^[[:space:]]*(#.*)?$|^rules:[[:space:]]*(#.*)?$' "$tmp")" ]; then
+    rm -f "$tmp" "$file"
+    echo "kiro-permissions: removed the block and the file $file (nothing else was in it)"
+  else
+    mv "$tmp" "$file"
+    echo "kiro-permissions: removed the block from $file"
+  fi
+  exit 0
+fi
+
+# --- print / apply ---------------------------------------------------------------------------
+[ -n "$plugin_dir" ] || plugin_dir="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P)"
+case "$plugin_dir" in
+  ''|*'"'*|*'\'*) echo "kiro-permissions: the plugin folder is empty or has an unsupported character" >&2; exit 4 ;;
+esac
+ls "$plugin_dir"/kiro/agents/*.md >/dev/null 2>&1 || { echo "kiro-permissions: $plugin_dir/kiro/agents has no agent files" >&2; exit 4; }
+safe "$server" || { echo "kiro-permissions: unsupported server name" >&2; exit 2; }
+for g in $github; do
+  acct="${g%@*}"; ghost="${g#*@}"
+  [ "$acct@$ghost" = "$g" ] && safe "$acct" && safe "$ghost" || { echo "kiro-permissions: --github wants <account>@<host> with letters, digits, . _ -" >&2; exit 2; }
+done
+
+[ "$pictures" = 0 ] || [ "$nopics" = 0 ] || usage
+
+# What the block already has stays (see the header).
+if [ -f "$file" ] && grep -q "# >>> agentic-workflow" "$file"; then
+  blk="$(awk -v b="# >>> agentic-workflow" -v e="# <<< agentic-workflow" 'index($0, b) { on = 1; next } on && index($0, e) { on = 0 } on { print }' "$file")"
+  old="$(printf '%s\n' "$blk" | sed -n 's/.*gh-as --account \([A-Za-z0-9._-][A-Za-z0-9._-]*\) --hostname \([A-Za-z0-9._-][A-Za-z0-9._-]*\) repo view.*/\1@\2/p')"
+  github="$github
+$old"
+  case "$blk" in *"jira-attachment get"*) [ "$nopics" = 1 ] || pictures=1 ;; esac
+fi
+github="$(printf '%s\n' "$github" | sed '/^$/d' | sort -u)"
+
+if [ "$cmd" = print ]; then
+  echo "# file: $file"
+  echo "rules:"
+  build "  "
+  exit 0
+fi
+
+# apply
+mkdir -p "$(dirname "$file")" || exit 1
+tmp="$(mktemp "$file.XXXXXX")" || exit 1
+trap 'rm -f "$tmp"' EXIT
+body="$(mktemp "$file.XXXXXX")" || exit 1
+trap 'rm -f "$tmp" "$body"' EXIT
+
+if [ -f "$file" ]; then
+  stripped "$file" > "$body"
+else
+  : > "$body"
+fi
+
+if [ -z "$(grep -v -E '^[[:space:]]*(#.*)?$' "$body")" ]; then
+  # missing, empty or only comments: write a fresh file
+  { cat "$body"; echo "rules:"; build "  "; } > "$tmp"
+else
+  n="$(grep -n '^rules:' "$body" | head -1 | cut -d: -f1)"
+  if [ -z "$n" ]; then
+    { cat "$body"; echo "rules:"; build "  "; } > "$tmp"
+  else
+    rest="$(sed -n "${n}p" "$body")"
+    if ! printf '%s\n' "$rest" | grep -q -E '^rules:[[:space:]]*(#.*)?$'; then
+      echo "kiro-permissions: $file has 'rules:' in a form this script will not edit (for example 'rules: []'). Add this block by hand under 'rules:':" >&2
+      build "  "
+      exit 3
+    fi
+    ind="$(awk -v n="$n" 'NR > n && /^[ \t]*- / { match($0, /^[ \t]*/); print RLENGTH; exit }' "$body")"
+    [ -n "$ind" ] || ind=2
+    { head -n "$n" "$body"; build "$(spaces "$ind")"; tail -n +"$((n + 1))" "$body"; } > "$tmp"
+  fi
+fi
+
+if [ -f "$file" ] && [ ! -e "$file.agentic-workflow.bak" ]; then
+  cp -p "$file" "$file.agentic-workflow.bak" || exit 1
+fi
+mv "$tmp" "$file" || exit 1
+echo "kiro-permissions: wrote the agentic-workflow rules to $file"

@@ -2,6 +2,8 @@
 # gh-as: run the GitHub CLI as one specific logged-in account, for this single process only.
 #
 # usage: gh-as --account <login> --host <host> <gh arguments...>
+#        gh-as --account <login> --hostname <host> <gh arguments...>   (the same; Kiro refuses a command
+#        that contains `--host <word>` because it takes it for a dev server, so Kiro uses this spelling)
 #
 # The token of <login> is read with `gh auth token --user` and handed to gh through an
 # environment variable of this process alone. gh's own active account and config are never
@@ -14,7 +16,7 @@ host=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --account) [ $# -ge 2 ] || { echo "gh-as: --account needs a value" >&2; exit 2; }; account="$2"; shift 2 ;;
-    --host)    [ $# -ge 2 ] || { echo "gh-as: --host needs a value" >&2; exit 2; };    host="$2";    shift 2 ;;
+    --host|--hostname) [ $# -ge 2 ] || { echo "gh-as: $1 needs a value" >&2; exit 2; }; host="$2"; shift 2 ;;
     --) shift; break ;;
     *) break ;;
   esac

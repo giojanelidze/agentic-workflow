@@ -1,5 +1,5 @@
 #!/bin/sh
-# Shell tests for bin/aw-paths, hooks/guard, bin/jira-attachment and bin/media-prep. No network, no claude CLI, no real HOME,
+# Shell tests for bin/aw-paths, hooks/guard, bin/gh-as, bin/kiro-permissions, bin/kiro-install, bin/jira-attachment and bin/media-prep. No network, no claude CLI, no real HOME,
 # no real keychain (fake security/curl/ffmpeg).
 # Run: sh tests/shell/run.sh   (npm test runs it after the plugin validation)
 
@@ -117,6 +117,27 @@ eq "aw two clones share the state" "$("$AW" --cwd "$R" --get state)" "$("$AW" --
 git -C "$R" -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init
 git -C "$R" worktree add -q "$TMP/work/wt" -b wt-branch
 eq "aw worktree shares the state" "$("$AW" --cwd "$R" --get state)" "$("$AW" --cwd "$TMP/work/wt" --get state)"
+
+# --tool kiro: its own base folder, the same team file in the repository, no legacy folder
+eq "aw kiro state path" "$HOME/.kiro/agentic-workflow/state/github.com/octo/hello" "$("$AW" --tool kiro --cwd "$R" --get state)"
+eq "aw kiro local path" "$HOME/.kiro/agentic-workflow/repos/github.com/octo/hello/local.json" "$("$AW" --tool kiro --cwd "$R" --get local)"
+eq "aw kiro personal config path" "$HOME/.kiro/agentic-workflow/repos/github.com/octo/hello/config.json" "$("$AW" --tool kiro --cwd "$R" --get personal_config)"
+eq "aw kiro team config is the same file" "$("$AW" --cwd "$R" --get team_config)" "$("$AW" --tool kiro --cwd "$R" --get team_config)"
+eq "aw kiro legacy stays empty although the folder exists" "" "$("$AW" --tool kiro --cwd "$R" --get legacy)"
+eq "aw claude legacy is still found" "$(cd "$R" && pwd -P)/.agentic-workflow" "$("$AW" --tool claude --cwd "$R" --get legacy)"
+eq "aw explicit claude host is the default" "$("$AW" --cwd "$R" --get state)" "$("$AW" --tool claude --cwd "$R" --get state)"
+eq "aw kiro and claude never share the state" "different" "$([ "$("$AW" --tool kiro --cwd "$R" --get state)" = "$("$AW" --tool claude --cwd "$R" --get state)" ] && echo same || echo different)"
+eq "aw kiro and claude never share local.json" "different" "$([ "$("$AW" --tool kiro --cwd "$R" --get local)" = "$("$AW" --tool claude --cwd "$R" --get local)" ] && echo same || echo different)"
+eq "aw unknown host" 2 "$("$AW" --tool nope --cwd "$R" >/dev/null 2>&1; echo $?)"
+eq "aw host without a value" 2 "$("$AW" --tool >/dev/null 2>&1; echo $?)"
+KP="$("$AW" --tool kiro --cwd "$R" --get personal_config)"
+mkdir -p "$(dirname "$KP")"; echo '{}' > "$KP"
+eq "aw kiro mode personal" personal "$("$AW" --tool kiro --cwd "$R" --get mode)"
+eq "aw a kiro personal config does not change the claude mode" none "$("$AW" --tool claude --cwd "$R" --get mode)"
+echo '{}' > "$R/.claude/agentic-workflow.json"
+eq "aw kiro mode conflict" conflict "$("$AW" --tool kiro --cwd "$R" --get mode)"
+eq "aw the claude side sees the shared team file alone" team "$("$AW" --tool claude --cwd "$R" --get mode)"
+rm "$KP" "$R/.claude/agentic-workflow.json"
 
 # ---------------------------------------------------------------- guard
 AN="agentic-workflow:jira-analyst"
@@ -242,6 +263,357 @@ eq "browser: main thread gets no opinion" none "$(dec "$(gin - ${CH}javascript_t
 out="$(gin $AN ${P}editJiraIssue "$G" | (cd / && "$GUARD"))"
 case "$out" in '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"'*'"}}') pass=$((pass + 1)) ;; *) fail=$((fail + 1)); printf 'FAIL: output shape [%s]\n' "$out" >&2 ;; esac
 eq "answer is a single line" 1 "$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
+write_team "$G" labels ""; write_local "$G" "$P" labels "" ""
+out="$(gin $AN ${P}editJiraIssue "$G" | (cd / && "$GUARD" --tool claude))"
+eq "an explicit --tool claude answers like the default" "$(gin $AN ${P}editJiraIssue "$G" | (cd / && "$GUARD"))" "$out"
+case "$out" in *'"permissionDecision":"allow"'*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); printf 'FAIL: --tool claude must allow an edit in labels mode [%s]\n' "$out" >&2 ;; esac
+
+# ---------------------------------------------------------------- guard on Kiro (--tool kiro)
+# Kiro names no agent and a global hook fires for every caller, so the guard never answers "allow": it
+# stays silent inside the accepted mode and blocks (exit 2, reason on stderr) everywhere else.
+KSRV="agentic-workflow-atlassian"
+KP="${KSRV}::"
+KT="mcp_agentic_workflow_atlassian_"
+kin() { # tool_name cwd [tool_input-json]
+  ti="${3:-}"; [ -n "$ti" ] || ti='{}'
+  printf '{"session_id":"sess_x","hook_event_name":"PreToolUse","cwd":"%s","tool_name":"%s","tool_input":%s}' "$2" "$1" "$ti"
+}
+kdec() { # raw hook input -> none (exit 0, silent) | block (exit 2, stderr only) | other:<rc>:<stdout>
+  out="$(printf '%s' "$1" | (cd / && "$GUARD" --tool kiro) 2>"$TMP/kerr")"; rc=$?
+  if [ "$rc" = 2 ] && [ -z "$out" ] && [ -s "$TMP/kerr" ]; then echo block
+  elif [ "$rc" = 0 ] && [ -z "$out" ] && [ ! -s "$TMP/kerr" ]; then echo none
+  else echo "other:$rc:$out"; fi
+}
+kreason() { printf '%s' "$1" | (cd / && "$GUARD" --tool kiro) 2>&1 >/dev/null; }
+write_klocal() { # repo mcpPrefix acceptedWriteMode
+  f="$("$AW" --tool kiro --cwd "$1" --get local)"
+  mkdir -p "$(dirname "$f")"
+  printf '{\n  "mcpPrefix": "%s",\n  "acceptedWriteMode": "%s"\n}\n' "$2" "$3" > "$f"
+}
+KR="$TMP/work/k repo"
+mkrepo "$KR" "https://github.com/octo/kguarded.git"
+
+# the write-mode matrix, accepted equal to configured: silent when the mode reaches the tool, a block otherwise
+write_team "$KR" labels ""; write_klocal "$KR" "$KP" labels
+eq "kiro labels: edit is silent" none "$(kdec "$(kin ${KT}editjiraissue "$KR")")"
+eq "kiro labels: comment blocked" block "$(kdec "$(kin ${KT}addcommenttojiraissue "$KR")")"
+eq "kiro labels: transition blocked" block "$(kdec "$(kin ${KT}transitionjiraissue "$KR")")"
+write_team "$KR" labels+comments ""; write_klocal "$KR" "$KP" labels+comments
+eq "kiro labels+comments: comment is silent" none "$(kdec "$(kin ${KT}addcommenttojiraissue "$KR")")"
+eq "kiro labels+comments: transition blocked" block "$(kdec "$(kin ${KT}transitionjiraissue "$KR")")"
+write_team "$KR" labels+comments+transition ""; write_klocal "$KR" "$KP" labels+comments+transition
+eq "kiro full: edit is silent" none "$(kdec "$(kin ${KT}editjiraissue "$KR")")"
+eq "kiro full: comment is silent" none "$(kdec "$(kin ${KT}addcommenttojiraissue "$KR")")"
+eq "kiro full: transition is silent" none "$(kdec "$(kin ${KT}transitionjiraissue "$KR")")"
+write_team "$KR" none ""; write_klocal "$KR" "$KP" none
+eq "kiro none: edit blocked" block "$(kdec "$(kin ${KT}editjiraissue "$KR")")"
+eq "kiro none: comment blocked" block "$(kdec "$(kin ${KT}addcommenttojiraissue "$KR")")"
+
+# the accepted ceiling: a config that grew through a pull never widens what the user accepted
+write_team "$KR" labels+comments+transition ""; write_klocal "$KR" "$KP" labels
+eq "kiro ceiling: edit is silent" none "$(kdec "$(kin ${KT}editjiraissue "$KR")")"
+eq "kiro ceiling: comment blocked" block "$(kdec "$(kin ${KT}addcommenttojiraissue "$KR")")"
+eq "kiro ceiling: transition blocked" block "$(kdec "$(kin ${KT}transitionjiraissue "$KR")")"
+contains "kiro ceiling: the reason names the Kiro setup command" "/agentic-workflow-setup --reconfigure jira" "$(kreason "$(kin ${KT}addcommenttojiraissue "$KR")")"
+contains "kiro ceiling: the reason says the accepted limit is lower" "wider write mode than you accepted" "$(kreason "$(kin ${KT}addcommenttojiraissue "$KR")")"
+write_team "$KR" labels ""; write_klocal "$KR" "$KP" labels+comments+transition
+eq "kiro narrowed config wins: comment blocked" block "$(kdec "$(kin ${KT}addcommenttojiraissue "$KR")")"
+write_team "$KR" labels+comments+transition ""; write_klocal "$KR" "$KP" ""
+eq "kiro missing accepted mode: edit blocked" block "$(kdec "$(kin ${KT}editjiraissue "$KR")")"
+
+# the server the repository is bound to
+write_team "$KR" labels+comments+transition ""; write_klocal "$KR" "other-server::" labels+comments+transition
+eq "kiro another server: edit blocked" block "$(kdec "$(kin ${KT}editjiraissue "$KR")")"
+write_klocal "$KR" "mcp__claude_ai_Atlassian_Rovo__" labels+comments+transition
+eq "kiro a Claude-style prefix is not a Kiro binding: blocked" block "$(kdec "$(kin ${KT}editjiraissue "$KR")")"
+write_klocal "$KR" "Agentic Workflow-Atlassian::" labels+comments+transition
+eq "kiro the server name is folded like Kiro folds it" none "$(kdec "$(kin ${KT}editjiraissue "$KR")")"
+write_klocal "$KR" "$KP" labels+comments+transition
+
+# a repository that is not set up, a conflict, a missing personal file: all blocked, never silent
+KN="$TMP/work/k none"; mkrepo "$KN" "https://github.com/octo/knone.git"
+eq "kiro mode none: blocked" block "$(kdec "$(kin ${KT}editjiraissue "$KN")")"
+KC="$TMP/work/k conflict"; mkrepo "$KC" "https://github.com/octo/kconflict.git"
+write_team "$KC" labels ""; write_klocal "$KC" "$KP" labels
+kcfg="$("$AW" --tool kiro --cwd "$KC" --get personal_config)"; mkdir -p "$(dirname "$kcfg")"; echo '{}' > "$kcfg"
+eq "kiro mode conflict: blocked" block "$(kdec "$(kin ${KT}editjiraissue "$KC")")"
+KL="$TMP/work/k nolocal"; mkrepo "$KL" "https://github.com/octo/knolocal.git"; write_team "$KL" labels ""
+eq "kiro no local.json: blocked" block "$(kdec "$(kin ${KT}editjiraissue "$KL")")"
+eq "kiro the Claude personal values are not read on Kiro" block "$(write_local "$KL" "$P" labels "" ""; kdec "$(kin ${KT}editjiraissue "$KL")")"
+eq "kiro cwd that is not a repository: blocked" block "$(kdec "$(kin ${KT}editjiraissue "$TMP/work/plain")")"
+eq "kiro no cwd: blocked" block "$(kdec '{"hook_event_name":"PreToolUse","tool_name":"'"${KT}"'editjiraissue","tool_input":{}}')"
+eq "kiro empty input: blocked" block "$(kdec '')"
+eq "kiro no tool name: blocked" block "$(kdec "{\"cwd\":\"$KR\",\"tool_input\":{}}")"
+ESC='{"cwd":"/tmp/a\"b","tool_name":"'"${KT}"'editjiraissue","tool_input":{}}'
+eq "kiro escaped cwd is unreadable: blocked" block "$(kdec "$ESC")"
+contains "kiro escaped cwd: the reason" "could not be read safely" "$(kreason "$ESC")"
+
+# only the three write tools are judged; everything else gets no opinion, whether or not the repository is set up
+eq "kiro a read tool: no opinion" none "$(kdec "$(kin ${KT}getjiraissue "$KR")")"
+eq "kiro a read tool in an unset repository: no opinion" none "$(kdec "$(kin ${KT}getjiraissue "$KN")")"
+eq "kiro the shell tool: no opinion" none "$(kdec "$(kin execute_bash "$KN")")"
+eq "kiro a Claude-style tool name: no opinion" none "$(kdec "$(kin mcp__claude_ai_Atlassian_Rovo__editJiraIssue "$KN")")"
+eq "kiro a browser tool: no opinion" none "$(kdec "$(kin mcp__claude-in-chrome__navigate "$KN")")"
+eq "kiro the tool id is judged as Kiro writes it (lower case)" none "$(kdec "$(kin ${KT}editJiraIssue "$KN")")"
+
+# the agent name in a Claude-shaped input changes nothing: Kiro does not use it
+eq "kiro ignores agent_type" none "$(kdec "$(gin $AN ${KT}editjiraissue "$KR")")"
+eq "kiro the main thread is judged like any caller" block "$(write_klocal "$KR" "$KP" none; kdec "$(gin - ${KT}editjiraissue "$KR")")"
+write_klocal "$KR" "$KP" labels+comments+transition
+
+# decoy keys inside tool_input never move the decision
+eq "kiro decoy cwd in tool_input does not move the repository" none "$(kdec "$(kin ${KT}editjiraissue "$KR" '{"cwd":"/nonexistent"}')")"
+eq "kiro decoy tool_name in tool_input cannot silence a write tool" block "$(write_klocal "$KR" "$KP" none; kdec "$(kin ${KT}editjiraissue "$KR" '{"tool_name":"mcp_x_getjiraissue"}')")"
+write_klocal "$KR" "$KP" labels+comments+transition
+eq "kiro decoy tool_name in tool_input cannot make a read tool a write tool" none "$(kdec "$(kin ${KT}getjiraissue "$KR" '{"tool_name":"'"${KT}"'transitionjiraissue"}')")"
+eq "kiro text with quotes and braces inside tool_input" none "$(kdec "$(kin ${KT}editjiraissue "$KR" '{"text":"a \" } { , \"cwd\": \"/x\""}')")"
+eq "kiro multi-line input" none "$(kdec "$(printf '{\n"cwd": "%s",\n"hook_event_name": "PreToolUse",\n"tool_name": "%seditjiraissue",\n"tool_input": {}\n}\n' "$KR" "$KT")")"
+
+# an environment that breaks the guard (no awk, sed or tr on PATH) blocks the call instead of letting it through
+write_team "$KR" labels+comments+transition ""; write_klocal "$KR" "$KP" labels+comments+transition
+eq "kiro a broken environment blocks (exit 2)" 2 "$(printf '%s' "$(kin ${KT}editjiraissue "$KR")" | (cd / && env PATH=/nonexistent "$GUARD" --tool kiro >/dev/null 2>&1); echo $?)"
+
+# it never prints an allow: not in any mode, for any of the three tools
+for m in labels labels+comments labels+comments+transition; do
+  write_team "$KR" "$m" ""; write_klocal "$KR" "$KP" "$m"
+  for t in editjiraissue addcommenttojiraissue transitionjiraissue; do
+    o="$(printf '%s' "$(kin ${KT}$t "$KR")" | (cd / && "$GUARD" --tool kiro) 2>/dev/null)"
+    case "$o" in *allow*) fail=$((fail + 1)); printf 'FAIL: kiro printed an allow for %s in %s\n' "$t" "$m" >&2 ;; *) pass=$((pass + 1)) ;; esac
+  done
+done
+
+# usage
+eq "guard unknown host" 2 "$(printf '' | "$GUARD" --tool nope >/dev/null 2>&1; echo $?)"
+eq "guard unknown option" 2 "$(printf '' | "$GUARD" --bogus >/dev/null 2>&1; echo $?)"
+eq "guard --marker needs --tool kiro" 2 "$(printf '' | "$GUARD" --marker >/dev/null 2>&1; echo $?)"
+eq "guard --check-alive needs --tool kiro" 2 "$("$GUARD" --check-alive >/dev/null 2>&1; echo $?)"
+eq "guard --marker and --check-alive together" 2 "$("$GUARD" --tool kiro --marker --check-alive >/dev/null 2>&1 </dev/null; echo $?)"
+
+# the SessionStart marker and the check the start preflight runs
+KM="$HOME/.kiro/agentic-workflow/hooks-alive"
+eq "kiro marker: hooks are not alive before any session" off "$(KIRO_SESSION_ID=sess_t1 "$GUARD" --tool kiro --check-alive)"
+mout="$(printf '{"hook_event_name":"SessionStart"}' | KIRO_SESSION_ID=sess_t1 "$GUARD" --tool kiro --marker 2>&1)"; mrc=$?
+eq "kiro marker: SessionStart exits 0" 0 "$mrc"
+eq "kiro marker: SessionStart prints nothing" "" "$mout"
+eq "kiro marker: the file is named after the session" yes "$([ -f "$KM/sess_t1" ] && echo yes || echo no)"
+eq "kiro marker: this session is alive" alive "$(KIRO_SESSION_ID=sess_t1 "$GUARD" --tool kiro --check-alive)"
+eq "kiro marker: another session is not" off "$(KIRO_SESSION_ID=sess_t2 "$GUARD" --tool kiro --check-alive)"
+eq "kiro marker: no session id is off" off "$(env -u KIRO_SESSION_ID "$GUARD" --tool kiro --check-alive)"
+eq "kiro marker: an unsafe session id is off" off "$(KIRO_SESSION_ID='../x' "$GUARD" --tool kiro --check-alive)"
+printf '{}' | KIRO_SESSION_ID='../evil' "$GUARD" --tool kiro --marker >/dev/null 2>&1
+eq "kiro marker: an unsafe session id creates no file" no "$([ -e "$HOME/.kiro/agentic-workflow/evil" ] || [ -e "$KM/../evil" ] && echo yes || echo no)"
+touch -t 200001010000 "$KM/sess_old"
+printf '{}' | KIRO_SESSION_ID=sess_t3 "$GUARD" --tool kiro --marker >/dev/null 2>&1
+eq "kiro marker: a week-old marker is pruned" no "$([ -e "$KM/sess_old" ] && echo yes || echo no)"
+eq "kiro marker: a fresh marker stays" yes "$([ -f "$KM/sess_t1" ] && echo yes || echo no)"
+
+# ---------------------------------------------------------------- gh-as (fake gh)
+GA="$ROOT/bin/gh-as"
+GFB="$TMP/ghfake"; mkdir -p "$GFB"
+cat > "$GFB/gh" <<'FAKE_GH'
+#!/bin/sh
+# a fake gh: `auth token` answers for every account but "ghost"; any other call shows what gh-as handed to it
+if [ "$1 $2" = "auth token" ]; then
+  shift 2; h=""; u=""
+  while [ $# -gt 0 ]; do case "$1" in --hostname) h="$2"; shift 2 ;; --user) u="$2"; shift 2 ;; *) shift ;; esac; done
+  [ "$u" = ghost ] && exit 1
+  printf 'tok-%s-%s\n' "$u" "$h"; exit 0
+fi
+printf 'ARGS=%s|HOST=%s|TOKEN=%s|ETOKEN=%s\n' "$*" "${GH_HOST:-}" "${GH_TOKEN:-}" "${GH_ENTERPRISE_TOKEN:-}"
+FAKE_GH
+chmod +x "$GFB/gh"
+gha() { PATH="$GFB:$PATH" "$GA" "$@"; }
+eq "gha --host: the token of that account, for github.com" "ARGS=repo view o/r|HOST=github.com|TOKEN=tok-octo-github.com|ETOKEN=" "$(gha --account octo --host github.com repo view o/r)"
+eq "gha --hostname is the same spelling" "ARGS=repo view o/r|HOST=github.com|TOKEN=tok-octo-github.com|ETOKEN=" "$(gha --account octo --hostname github.com repo view o/r)"
+eq "gha a self-hosted host gets the enterprise token" "ARGS=pr list|HOST=git.example.com|TOKEN=|ETOKEN=tok-octo-git.example.com" "$(gha --account octo --hostname git.example.com pr list)"
+eq "gha an account without a login" 3 "$(gha --account ghost --hostname github.com repo view >/dev/null 2>&1; echo $?)"
+eq "gha --hostname needs a value" 2 "$(gha --account octo --hostname >/dev/null 2>&1; echo $?)"
+eq "gha --host needs a value" 2 "$(gha --account octo --host >/dev/null 2>&1; echo $?)"
+eq "gha without gh arguments" 2 "$(gha --account octo --hostname github.com >/dev/null 2>&1; echo $?)"
+eq "gha without an account" 2 "$(gha --hostname github.com repo view >/dev/null 2>&1; echo $?)"
+eq "gha the token never reaches the output of a failure" "" "$(gha --account ghost --hostname github.com repo view 2>&1 | grep -c 'tok-' | sed 's/^0$//')"
+
+# ---------------------------------------------------------------- kiro-permissions
+KPM="$ROOT/bin/kiro-permissions"
+KPL="$TMP/kplug"; mkdir -p "$KPL/kiro/agents"
+touch "$KPL/kiro/agents/agentic-workflow.md" "$KPL/kiro/agents/agentic-workflow-test-runner.md"
+kp() { sub="$1"; shift; "$KPM" "$sub" --plugin-dir "$KPL" "$@"; }
+printed="$(kp print --github octo@github.com)"
+contains "kp the block starts with a marker" "# >>> agentic-workflow" "$printed"
+contains "kp the block ends with a marker" "# <<< agentic-workflow" "$printed"
+contains "kp aw-paths is an exact command, no star" '- "~/.kiro/agentic-workflow-plugin/bin/aw-paths --tool kiro"' "$printed"
+contains "kp the alive check is an exact command" '- "~/.kiro/agentic-workflow-plugin/hooks/guard --tool kiro --check-alive"' "$printed"
+contains "kp read-only gh-as with the account and the host" '- "~/.kiro/agentic-workflow-plugin/bin/gh-as --account octo --hostname github.com repo view *"' "$printed"
+contains "kp gh-as pr checks" '--account octo --hostname github.com pr checks *"' "$printed"
+contains "kp an Atlassian read tool as server/tool" '- "agentic-workflow-atlassian/getJiraIssue"' "$printed"
+contains "kp the plugin folder is read by the path it was given" "- \"$KPL/**\"" "$printed"
+contains "kp the data tree is readable" '- "~/.kiro/agentic-workflow/**"' "$printed"
+contains "kp subagent names come from kiro/agents" '- "agentic-workflow-test-runner"' "$printed"
+for bad in deny editJiraIssue addCommentToJiraIssue transitionJiraIssue claude-in-chrome "jira-attachment login" repos local.json config.json; do
+  case "$printed" in *"$bad"*) fail=$((fail + 1)); printf 'FAIL: kiro-permissions printed [%s]\n' "$bad" >&2 ;; *) pass=$((pass + 1)) ;; esac
+done
+case "$printed" in *jira-attachment*|*media-prep*) fail=$((fail + 1)); echo "FAIL: kp pictures rules without --pictures" >&2 ;; *) pass=$((pass + 1)) ;; esac
+pics="$(kp print --pictures)"
+contains "kp --pictures adds jira-attachment get" 'bin/jira-attachment get *"' "$pics"
+contains "kp --pictures adds jira-attachment check" 'bin/jira-attachment check *"' "$pics"
+contains "kp --pictures adds media-prep" 'bin/media-prep *"' "$pics"
+case "$pics" in *"jira-attachment login"*|*"jira-attachment *"*) fail=$((fail + 1)); echo "FAIL: kp must never allow jira-attachment login" >&2 ;; *) pass=$((pass + 1)) ;; esac
+eq "kp every rule is an allow rule" "$(printf '%s\n' "$printed" | grep -c '^  - capability:')" "$(printf '%s\n' "$printed" | grep -c '^    effect: allow$')"
+eq "kp fs_write covers exactly state/** and memory/**" "- \"~/.kiro/agentic-workflow/state/**\"|- \"~/.kiro/agentic-workflow/memory/**\"" "$(printf '%s\n' "$printed" | awk '/capability:/ { w = ($0 ~ /fs_write/) } w && /^      - / { sub(/^ +/, ""); a = a (a ? "|" : "") $0 } END { print a }')"
+eq "kp every shell rule runs through the plugin link" 0 "$(printf '%s\n' "$printed" | awk '/capability:/ { s = ($0 ~ /shell/) } s && /^      - / && $0 !~ /"~\/.kiro\/agentic-workflow-plugin\// { n++ } END { print n + 0 }')"
+eq "kp two accounts give two sets" 8 "$(kp print --github a@github.com --github b@git.example.com | grep -c -- '--account')"
+eq "kp a bad --github is refused" 2 "$(kp print --github 'a b@github.com' >/dev/null 2>&1; echo $?)"
+eq "kp --github without a host is refused" 2 "$(kp print --github octo >/dev/null 2>&1; echo $?)"
+eq "kp an unsafe server name is refused" 2 "$(kp print --server 'x"y' >/dev/null 2>&1; echo $?)"
+eq "kp no subcommand" 2 "$("$KPM" >/dev/null 2>&1; echo $?)"
+eq "kp unknown option" 2 "$(kp apply --bogus >/dev/null 2>&1; echo $?)"
+eq "kp a plugin folder without kiro/agents" 4 "$("$KPM" print --plugin-dir "$TMP/work" >/dev/null 2>&1; echo $?)"
+
+PD="$TMP/perm"; mkdir -p "$PD"
+# a new file
+PF="$PD/new/permissions.yaml"
+kp apply --file "$PF" >/dev/null
+eq "kp apply creates the file with rules: first" "rules:" "$(sed -n 1p "$PF")"
+eq "kp apply writes the begin marker once" 1 "$(grep -c '# >>> agentic-workflow' "$PF")"
+eq "kp apply writes the end marker once" 1 "$(grep -c '# <<< agentic-workflow' "$PF")"
+kp remove --file "$PF" >/dev/null
+eq "kp remove deletes a file the script created" no "$([ -e "$PF" ] && echo yes || echo no)"
+# a file with the usual two-space list
+PF="$PD/two.yaml"
+printf 'rules:\n  - capability: shell\n    effect: allow\n    match:\n      - git *\n' > "$PF"; cp "$PF" "$PD/two.orig"
+kp apply --file "$PF" >/dev/null
+contains "kp apply keeps the user's rules" "      - git *" "$(cat "$PF")"
+eq "kp apply puts the block under rules: with the same indent" "  - capability: mcp" "$(sed -n 3p "$PF")"
+eq "kp apply keeps a copy of the original once" yes "$(cmp -s "$PF.agentic-workflow.bak" "$PD/two.orig" && echo yes || echo no)"
+cp "$PF" "$PD/two.after"
+kp apply --file "$PF" >/dev/null
+eq "kp apply is idempotent" yes "$(cmp -s "$PF" "$PD/two.after" && echo yes || echo no)"
+kp apply --file "$PF" --github other@github.com >/dev/null
+contains "kp apply replaces its own block" "--account other " "$(cat "$PF")"
+eq "kp apply replaces, never duplicates" 1 "$(grep -c '# >>> agentic-workflow' "$PF")"
+kp apply --file "$PF" --github third@git.example.com --pictures >/dev/null
+contains "kp a second repository keeps the first account" "--account other --hostname github.com repo view" "$(cat "$PF")"
+contains "kp a second repository adds its account" "--account third --hostname git.example.com repo view" "$(cat "$PF")"
+contains "kp --pictures adds the picture rules" "bin/media-prep *" "$(cat "$PF")"
+kp apply --file "$PF" --github third@git.example.com >/dev/null
+contains "kp the picture rules stay when a later apply does not name them" "bin/media-prep *" "$(cat "$PF")"
+kp apply --file "$PF" --no-pictures >/dev/null
+case "$(cat "$PF")" in *media-prep*|*jira-attachment*) fail=$((fail + 1)); echo "FAIL: kp --no-pictures must take the picture rules out" >&2 ;; *) pass=$((pass + 1)) ;; esac
+contains "kp --no-pictures keeps the accounts" "--account other --hostname github.com repo view" "$(cat "$PF")"
+eq "kp --pictures with --no-pictures is a usage error" 2 "$(kp apply --file "$PF" --pictures --no-pictures >/dev/null 2>&1; echo $?)"
+kp remove --file "$PF" >/dev/null
+eq "kp remove restores the original file" yes "$(cmp -s "$PF" "$PD/two.orig" && echo yes || echo no)"
+eq "kp remove without a block is a no-op" 0 "$(kp remove --file "$PF" >/dev/null 2>&1; echo $?)"
+# a list without indentation
+PF="$PD/zero.yaml"
+printf 'rules:\n- capability: shell\n  effect: allow\n  match:\n  - "echo *"\n' > "$PF"
+kp apply --file "$PF" >/dev/null
+eq "kp apply follows a list without indentation" 1 "$(grep -c '^- capability: mcp$' "$PF")"
+# a layout it will not edit
+PF="$PD/flow.yaml"; printf 'rules: []\n' > "$PF"
+eq "kp refuses rules: []" 3 "$(kp apply --file "$PF" >/dev/null 2>&1; echo $?)"
+eq "kp leaves a refused file unchanged" "rules: []" "$(cat "$PF")"
+contains "kp says what to add by hand" "by hand" "$(kp apply --file "$PF" 2>&1 >/dev/null)"
+# a file without rules:
+PF="$PD/norules.yaml"; printf 'version: 1\n' > "$PF"
+kp apply --file "$PF" >/dev/null
+eq "kp appends rules: to a file that has none" "version: 1|rules:" "$(sed -n 1,2p "$PF" | tr '\n' '|' | sed 's/|$//')"
+
+# ---------------------------------------------------------------- kiro-install
+KI_SRC="$TMP/work/i plug"
+mkdir -p "$KI_SRC/bin" "$KI_SRC/hooks" "$KI_SRC/kiro/agents" "$KI_SRC/kiro/prompts" "$KI_SRC/kiro/hooks"
+cp "$ROOT/bin/kiro-install" "$KI_SRC/bin/kiro-install"; chmod +x "$KI_SRC/bin/kiro-install"
+printf '#!/bin/sh\nexit 0\n' > "$KI_SRC/hooks/guard"; chmod +x "$KI_SRC/hooks/guard"
+printf -- '---\nname: agentic-workflow\n---\nbody\n' > "$KI_SRC/kiro/agents/agentic-workflow.md"
+printf -- '---\nname: agentic-workflow-x\n---\nbody\n' > "$KI_SRC/kiro/agents/agentic-workflow-x.md"
+printf 'Arguments: $ARGUMENTS\n' > "$KI_SRC/kiro/prompts/agentic-workflow-start.md"
+printf '{"version":"v1","hooks":[]}\n' > "$KI_SRC/kiro/hooks/agentic-workflow.json"
+KI="$KI_SRC/bin/kiro-install"
+KFB="$TMP/kfakebin"; mkdir -p "$KFB"
+# a fake kiro-cli: logs its arguments and keeps a global mcp.json like the real one
+cat > "$KFB/kiro-cli" <<'FAKE_KIRO'
+#!/bin/sh
+echo "$*" >> "$KFAKE_LOG"
+if [ "$1 $2" = "mcp add" ]; then
+  mkdir -p "$HOME/.kiro/settings"
+  printf '{"mcpServers":{"agentic-workflow-atlassian":{"url":"x"}}}\n' > "$HOME/.kiro/settings/mcp.json"
+elif [ "$1 $2" = "mcp remove" ]; then
+  rm -f "$HOME/.kiro/settings/mcp.json"
+fi
+exit 0
+FAKE_KIRO
+chmod +x "$KFB/kiro-cli"
+KFAKE_LOG="$TMP/kiro-cli.log"; export KFAKE_LOG
+KH="$TMP/khome"; mkdir -p "$KH"
+ki() { HOME="$KH" PATH="$KFB:$PATH" "$KI" "$@" </dev/null; }
+kiq() { ki "$@" >/dev/null 2>&1; echo $?; }
+K="$KH/.kiro"
+
+eq "ki install exits 0" 0 "$(kiq --yes)"
+eq "ki the plugin link points to the checkout" "$(cd "$KI_SRC" && pwd -P)" "$(readlink "$K/agentic-workflow-plugin")"
+eq "ki an agent is a link to the checkout file" "$(cd "$KI_SRC" && pwd -P)/kiro/agents/agentic-workflow-x.md" "$(readlink "$K/agents/agentic-workflow-x.md")"
+eq "ki a prompt is a copy, not a link" yes "$([ -f "$K/prompts/agentic-workflow-start.md" ] && [ ! -L "$K/prompts/agentic-workflow-start.md" ] && cmp -s "$K/prompts/agentic-workflow-start.md" "$KI_SRC/kiro/prompts/agentic-workflow-start.md" && echo yes || echo no)"
+eq "ki the hook is a copy, not a link" yes "$([ -f "$K/hooks/agentic-workflow.json" ] && [ ! -L "$K/hooks/agentic-workflow.json" ] && cmp -s "$K/hooks/agentic-workflow.json" "$KI_SRC/kiro/hooks/agentic-workflow.json" && echo yes || echo no)"
+eq "ki the files it made are listed" 5 "$(wc -l < "$K/agentic-workflow/installed-files" | tr -d ' ')"
+contains "ki the Atlassian server is added with the v2 address" "mcp add --name agentic-workflow-atlassian --url https://mcp.atlassian.com/v2/mcp --scope global" "$(cat "$KFAKE_LOG")"
+eq "ki a second install exits 0" 0 "$(kiq --yes)"
+eq "ki the server is added only once" 1 "$(grep -c 'mcp add' "$KFAKE_LOG")"
+eq "ki --check passes after an install" 0 "$(kiq --check)"
+printf 'edited\n' >> "$K/prompts/agentic-workflow-start.md"
+eq "ki --check sees a changed copy" 1 "$(kiq --check)"
+contains "ki --check names the changed copy" "changed: $K/prompts/agentic-workflow-start.md" "$(ki --check 2>&1)"
+eq "ki an update overwrites a copy it made" 0 "$(kiq --yes)"
+eq "ki the update restored the copy" yes "$(cmp -s "$K/prompts/agentic-workflow-start.md" "$KI_SRC/kiro/prompts/agentic-workflow-start.md" && echo yes || echo no)"
+rm "$K/hooks/agentic-workflow.json"
+eq "ki --check sees a missing hook" 1 "$(kiq --check)"
+kiq --yes >/dev/null
+eq "ki an install puts a missing hook back" 0 "$(kiq --check)"
+
+# a file that is not ours is never overwritten
+KH2="$TMP/khome2"; mkdir -p "$KH2/.kiro/prompts"; printf 'mine\n' > "$KH2/.kiro/prompts/agentic-workflow-start.md"
+out2="$(HOME="$KH2" PATH="$KFB:$PATH" "$KI" --no-mcp </dev/null 2>&1)"; rc2=$?
+eq "ki a foreign prompt: exit 1" 1 "$rc2"
+eq "ki a foreign prompt is left alone" "mine" "$(cat "$KH2/.kiro/prompts/agentic-workflow-start.md")"
+contains "ki a foreign prompt is reported" "was not installed by kiro-install" "$out2"
+eq "ki the other items are still installed" yes "$([ -L "$KH2/.kiro/agents/agentic-workflow.md" ] && echo yes || echo no)"
+KH3="$TMP/khome3"; mkdir -p "$KH3/.kiro/agents"; printf 'x\n' > "$KH3/.kiro/agents/agentic-workflow.md"
+eq "ki a foreign agent file is refused" 1 "$(HOME="$KH3" PATH="$KFB:$PATH" "$KI" --no-mcp </dev/null >/dev/null 2>&1; echo $?)"
+eq "ki a foreign agent file is left alone" "x" "$(cat "$KH3/.kiro/agents/agentic-workflow.md")"
+
+# the server question: not without a yes, never with --no-mcp
+: > "$KFAKE_LOG"
+KH4="$TMP/khome4"; mkdir -p "$KH4"
+HOME="$KH4" PATH="$KFB:$PATH" "$KI" </dev/null >/dev/null 2>&1
+eq "ki without a terminal and without --yes the server is not added" "" "$(cat "$KFAKE_LOG")"
+HOME="$KH4" PATH="$KFB:$PATH" "$KI" --no-mcp --yes </dev/null >/dev/null 2>&1
+eq "ki --no-mcp never calls kiro-cli" "" "$(cat "$KFAKE_LOG")"
+
+# another checkout takes the plugin link over
+KI_SRC2="$TMP/work/i plug two"; cp -R "$KI_SRC" "$KI_SRC2"
+HOME="$KH" PATH="$KFB:$PATH" "$KI_SRC2/bin/kiro-install" --no-mcp </dev/null >/dev/null 2>&1
+eq "ki another checkout re-points the plugin link" "$(cd "$KI_SRC2" && pwd -P)" "$(readlink "$K/agentic-workflow-plugin")"
+
+# refusals
+eq "ki another KIRO_HOME is not supported" 3 "$(KIRO_HOME="$TMP/elsewhere" HOME="$KH" "$KI" --check >/dev/null 2>&1 </dev/null; echo $?)"
+eq "ki the default KIRO_HOME is fine" 0 "$(KIRO_HOME="$KH4/.kiro" HOME="$KH4" PATH="$KFB:$PATH" "$KI" --no-mcp >/dev/null 2>&1 </dev/null; echo $?)"
+mkdir -p "$TMP/nokiro/bin"; cp "$ROOT/bin/kiro-install" "$TMP/nokiro/bin/"
+eq "ki a checkout without kiro/ is refused" 3 "$(HOME="$KH" "$TMP/nokiro/bin/kiro-install" --check >/dev/null 2>&1 </dev/null; echo $?)"
+eq "ki --check and --uninstall together" 2 "$(kiq --check --uninstall)"
+eq "ki unknown option" 2 "$(kiq --bogus)"
+
+# uninstall: only what it made, and it says what it leaves
+mkdir -p "$K/agentic-workflow/state"; printf 'run\n' > "$K/agentic-workflow/state/keep"
+printf 'edited\n' >> "$K/prompts/agentic-workflow-start.md"
+: > "$KFAKE_LOG"
+HOME="$KH" PATH="$KFB:$PATH" "$KI_SRC2/bin/kiro-install" --uninstall --yes </dev/null > "$TMP/ki-un.out" 2>&1
+eq "ki uninstall removes the plugin link" no "$([ -e "$K/agentic-workflow-plugin" ] || [ -L "$K/agentic-workflow-plugin" ] && echo yes || echo no)"
+eq "ki uninstall removes the agent links" no "$([ -L "$K/agents/agentic-workflow-x.md" ] && echo yes || echo no)"
+eq "ki uninstall removes the hook copy" no "$([ -e "$K/hooks/agentic-workflow.json" ] && echo yes || echo no)"
+eq "ki uninstall leaves a copy that was edited" yes "$([ -f "$K/prompts/agentic-workflow-start.md" ] && echo yes || echo no)"
+contains "ki uninstall says why it left it" "left: $K/prompts/agentic-workflow-start.md" "$(cat "$TMP/ki-un.out")"
+eq "ki uninstall leaves the data folder" run "$(cat "$K/agentic-workflow/state/keep")"
+contains "ki uninstall removes the server after a yes" "mcp remove --name agentic-workflow-atlassian --scope global" "$(cat "$KFAKE_LOG")"
+contains "ki uninstall names the permission rules it did not touch" "kiro-permissions remove" "$(cat "$TMP/ki-un.out")"
 
 # ---------------------------------------------------------------- jira-attachment (fake keychain and curl)
 JA="$ROOT/bin/jira-attachment"
@@ -478,13 +850,117 @@ contains "mp manifest refuses a symlink" "rejected a picture file is missing or 
 printf '{\n  "files": []\n}\n' > "$TMP/mf0.json"
 contains "mp manifest refuses a manifest without dir" "rejected the manifest has no absolute dir" "$("$MP" manifest --file "$TMP/mf0.json" 2>&1)"
 
+# ---------------------------------------------------------------- kiro/ files (static consistency)
+KA="$ROOT/kiro/agents"
+HOSTMD="$ROOT/kiro/HOST.md"
+shared_n=0; wrap_n=0
+for f in "$ROOT"/agents/*.md; do
+  a="${f##*/}"; a="${a%.md}"; shared_n=$((shared_n + 1))
+  [ -f "$KA/agentic-workflow-$a.md" ] && pass=$((pass + 1)) || { fail=$((fail + 1)); printf 'FAIL: agents/%s.md has no Kiro wrapper\n' "$a" >&2; }
+done
+for f in "$KA"/agentic-workflow-*.md; do
+  a="${f##*/agentic-workflow-}"; a="${a%.md}"; wrap_n=$((wrap_n + 1))
+  [ -f "$ROOT/agents/$a.md" ] && pass=$((pass + 1)) || { fail=$((fail + 1)); printf 'FAIL: the Kiro wrapper %s has no agents/%s.md\n' "${f##*/}" "$a" >&2; }
+  eq "kiro agent $a: its name is the file name" "name: agentic-workflow-$a" "$(grep -m1 '^name:' "$f")"
+  contains "kiro agent $a: it loads the shared agent file" "  - file://~/.kiro/agentic-workflow-plugin/agents/$a.md" "$(cat "$f")"
+  contains "kiro agent $a: it loads HOST.md" "  - file://~/.kiro/agentic-workflow-plugin/kiro/HOST.md" "$(cat "$f")"
+  eq "kiro agent $a: no repository MCP file" 1 "$(grep -c '^includeMcpJson: false$' "$f")"
+  contains "kiro agent $a: it is told never to call user_input" 'Never call the built-in tool `user_input`' "$(cat "$f")"
+  # nothing a wrapper ships may grant permissions, run hooks or open another MCP server
+  for bad in '^permissions:' '^hooks:' '^includeMcpJson: true' '"\*"' '@builtin' '"subagent"' '"@mcp"'; do
+    if grep -Eq "$bad" "$f"; then fail=$((fail + 1)); printf 'FAIL: %s contains %s\n' "${f##*/}" "$bad" >&2; else pass=$((pass + 1)); fi
+  done
+  case "$a" in
+    jira-analyst) ;;
+    *) eq "kiro agent $a: no MCP server of its own" 0 "$(grep -c '^mcpServers:' "$f")" ;;
+  esac
+  case "$(grep -m1 '^model:' "$f")" in
+    "model: claude-opus-5.5"|"model: claude-sonnet-5.5") pass=$((pass + 1)) ;;
+    *) fail=$((fail + 1)); printf 'FAIL: %s has an unknown model\n' "${f##*/}" >&2 ;;
+  esac
+  # Kiro loads at most 50000 characters of a resource file and about 99000 of all of them
+  sz1="$(wc -c < "$ROOT/agents/$a.md" | tr -d ' ')"; sz2="$(wc -c < "$HOSTMD" | tr -d ' ')"
+  if [ "$sz1" -lt 50000 ] && [ "$sz2" -lt 50000 ] && [ $((sz1 + sz2)) -lt 90000 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); printf 'FAIL: the resources of %s are too large for Kiro (%s + %s)\n' "$a" "$sz1" "$sz2" >&2; fi
+done
+eq "kiro every shared agent has exactly one wrapper" "$shared_n" "$wrap_n"
+for a in correctness-reviewer conventions-reviewer security-reviewer performance-reviewer media-analyst review-aggregator; do
+  tl="$(grep -m1 '^tools:' "$KA/agentic-workflow-$a.md")"
+  case "$tl" in *shell*|*execute_bash*|*str_replace*|*'"write"'*) fail=$((fail + 1)); printf 'FAIL: %s must not have a shell or an edit tool: %s\n' "$a" "$tl" >&2 ;; *) pass=$((pass + 1)) ;; esac
+done
+for a in correctness-reviewer conventions-reviewer security-reviewer performance-reviewer media-analyst review-aggregator; do
+  case "$(grep -m1 '^tools:' "$KA/agentic-workflow-$a.md")" in *fs_write*) fail=$((fail + 1)); printf 'FAIL: %s must not write\n' "$a" >&2 ;; *) pass=$((pass + 1)) ;; esac
+done
+eq "kiro media-analyst has exactly read_file" 'tools: ["read_file"]' "$(grep -m1 '^tools:' "$KA/agentic-workflow-media-analyst.md")"
+eq "kiro the four reviewers read and search only" 4 "$(grep -l '^tools: \["read_file", "grep_search", "file_search"\]$' "$KA"/agentic-workflow-*-reviewer.md | wc -l | tr -d ' ')"
+eq "kiro the aggregator only reads (the orchestrator saves its summary)" 'tools: ["read_file"]' "$(grep -m1 '^tools:' "$KA/agentic-workflow-review-aggregator.md")"
+eq "kiro the planner cannot edit existing files" 0 "$(grep -m1 '^tools:' "$KA/agentic-workflow-implementation-planner.md" | grep -c str_replace)"
+eq "kiro the analyst gets the one Atlassian server and cannot delete files" 'tools: ["read", "fs_write", "str_replace", "shell", "@agentic-workflow-atlassian"]' "$(grep -m1 '^tools:' "$KA/agentic-workflow-jira-analyst.md")"
+eq "kiro only the analyst and the orchestrator have the Atlassian tools" 2 "$(grep -l '@agentic-workflow-atlassian' "$KA"/*.md | wc -l | tr -d ' ')"
+eq "kiro only the analyst and the orchestrator declare the server" 2 "$(grep -l '^mcpServers:' "$KA"/*.md | wc -l | tr -d ' ')"
+eq "kiro the server address is the v2 one" 2 "$(grep -c 'url: "https://mcp.atlassian.com/v2/mcp"' "$KA/agentic-workflow-jira-analyst.md" "$KA/agentic-workflow.md" | awk -F: '{ n += $2 } END { print n }')"
+eq "kiro the orchestrator may start the 11 stage agents and no other" 11 "$(grep -m1 '^tools:' "$KA/agentic-workflow.md" | grep -o 'subagent/agentic-workflow-[a-z-]*' | sort -u | wc -l | tr -d ' ')"
+for f in "$ROOT"/agents/*.md; do
+  a="${f##*/}"; a="${a%.md}"
+  contains "kiro the orchestrator may start $a" "\"subagent/agentic-workflow-$a\"" "$(grep -m1 '^tools:' "$KA/agentic-workflow.md")"
+done
+eq "kiro the implementer wrapper names its memory folder" 1 "$(grep -c '~/.kiro/agentic-workflow/memory/implementer/' "$KA/agentic-workflow-implementer.md")"
+
+# the hook: it matches the three write tools of the plugin's server, as Kiro writes their ids, and nothing else
+KHOOK="$ROOT/kiro/hooks/agentic-workflow.json"
+KMATCH="$(sed -n 's/.*"matcher": "\(.*\)",$/\1/p' "$KHOOK")"
+for id in mcp_agentic_workflow_atlassian_editjiraissue mcp_agentic_workflow_atlassian_addcommenttojiraissue mcp_agentic_workflow_atlassian_transitionjiraissue; do
+  printf '%s' "$id" | grep -Eq "$KMATCH" && pass=$((pass + 1)) || { fail=$((fail + 1)); printf 'FAIL: the Kiro hook matcher misses %s\n' "$id" >&2; }
+done
+for id in mcp_agentic_workflow_atlassian_getjiraissue mcp_agentic_workflow_atlassian_editjiraissue_x xmcp_agentic_workflow_atlassian_editjiraissue mcp_other_editjiraissue mcp_agentic_workflow_atlassian_editJiraIssue execute_bash; do
+  printf '%s' "$id" | grep -Eq "$KMATCH" && { fail=$((fail + 1)); printf 'FAIL: the Kiro hook matcher also matches %s\n' "$id" >&2; } || pass=$((pass + 1))
+done
+eq "kiro hook: the guard runs with --tool kiro" 1 "$(grep -c '"command": "~/.kiro/agentic-workflow-plugin/hooks/guard --tool kiro" *}' "$KHOOK")"
+eq "kiro hook: the session marker runs with --tool kiro --marker" 1 "$(grep -c '"command": "~/.kiro/agentic-workflow-plugin/hooks/guard --tool kiro --marker"' "$KHOOK")"
+eq "kiro hook: no hook runs without --tool kiro" 0 "$(grep '"command"' "$KHOOK" | grep -vc -- '--tool kiro')"
+eq "kiro hook: the guard is blocking on a PreToolUse only" 1 "$(grep -c '"trigger": "PreToolUse"' "$KHOOK")"
+# the matcher's server is the server the agents declare (Kiro folds the name: lower case, - to _)
+srv="$(sed -n 's/^  \([A-Za-z0-9-]*\):$/\1/p' "$KA/agentic-workflow-jira-analyst.md" | head -1)"
+eq "kiro the declared server" agentic-workflow-atlassian "$srv"
+eq "kiro the hook matcher names the declared server as Kiro folds it" "mcp_$(printf '%s' "$srv" | tr 'A-Z' 'a-z' | tr ' -' '__' | tr -cd 'a-z0-9_')_" "$(printf '%s' "$KMATCH" | sed -n 's/^\^\(mcp_[a-z0-9_]*_\)(.*/\1/p')"
+eq "kiro kiro-permissions names the same server" "$srv" "$(sed -n 's/^server="\(.*\)"$/\1/p' "$ROOT/bin/kiro-permissions" | head -1)"
+eq "kiro kiro-install names the same server" "$srv" "$(sed -n 's/^SERVER="\(.*\)"$/\1/p' "$ROOT/bin/kiro-install" | head -1)"
+eq "kiro the guard reads the same prefix form setup stores" 1 "$(grep -c '`mcpPrefix` is `agentic-workflow-atlassian::`' "$HOSTMD")"
+
+# the prompts: no frontmatter (Kiro sends it to the model as text), the arguments, and the shared skill they follow
+for x in start setup media; do
+  p="$ROOT/kiro/prompts/agentic-workflow-$x.md"
+  [ -f "$p" ] && pass=$((pass + 1)) || { fail=$((fail + 1)); printf 'FAIL: missing prompt %s\n' "$p" >&2; continue; }
+  eq "kiro prompt $x: no frontmatter" "no" "$([ "$(head -c 3 "$p")" = "---" ] && echo yes || echo no)"
+  eq "kiro prompt $x: it passes the arguments" 1 "$(grep -c '^Arguments: \$ARGUMENTS$' "$p")"
+  contains "kiro prompt $x: it follows the shared skill" "~/.kiro/agentic-workflow-plugin/skills/$x/SKILL.md" "$(cat "$p")"
+  [ -f "$ROOT/skills/$x/SKILL.md" ] && pass=$((pass + 1)) || { fail=$((fail + 1)); printf 'FAIL: skills/%s/SKILL.md is missing\n' "$x" >&2; }
+  contains "kiro prompt $x: it reads HOST.md" "kiro/HOST.md" "$(cat "$p")"
+done
+eq "kiro there is one prompt per skill" "$(ls "$ROOT"/skills | wc -l | tr -d ' ')" "$(ls "$ROOT"/kiro/prompts | wc -l | tr -d ' ')"
+
+# HOST.md overrides passages of the shared files by their exact text: each one must still be there, and named in HOST.md
+for pair in 'skills/setup/SKILL.md|**Tool names.**' 'skills/setup/SKILL.md|**Atlassian server.**' 'skills/setup/SKILL.md|**Authorization.**' \
+            'skills/setup/SKILL.md|## Waiting for an authorization' 'skills/setup/SKILL.md|## Permission rules' 'skills/setup/SKILL.md|## Migration from an older version' \
+            'skills/start/SKILL.md|- Hooks:' 'skills/start/SKILL.md|- Jira authorization:'; do
+  file="${pair%%|*}"; anchor="${pair#*|}"
+  grep -Fq -- "$anchor" "$ROOT/$file" && pass=$((pass + 1)) || { fail=$((fail + 1)); printf 'FAIL: %s no longer contains [%s], which kiro/HOST.md overrides\n' "$file" "$anchor" >&2; }
+  grep -Fq -- "$anchor" "$HOSTMD" && pass=$((pass + 1)) || { fail=$((fail + 1)); printf 'FAIL: kiro/HOST.md does not name [%s]\n' "$anchor" >&2; }
+done
+# the rules the installer's permission script writes cover exactly the agents that exist
+eq "kiro kiro-permissions allows the 12 agents of this checkout" 12 "$("$ROOT/bin/kiro-permissions" print --plugin-dir "$ROOT" | awk '/capability:/ { s = ($0 ~ /subagent/) } s && /^      - / { n++ } END { print n + 0 }')"
+# the real checkout installs into a scratch Kiro home, and passes its own check
+KRH="$TMP/kreal"; mkdir -p "$KRH"
+eq "kiro the real checkout installs" 0 "$(HOME="$KRH" "$ROOT/bin/kiro-install" --no-mcp >/dev/null 2>&1 </dev/null; echo $?)"
+eq "kiro the real checkout passes --check" 0 "$(HOME="$KRH" "$ROOT/bin/kiro-install" --no-mcp --check >/dev/null 2>&1 </dev/null; echo $?)"
+eq "kiro the installed hook calls a guard that exists" yes "$([ -x "$KRH/.kiro/agentic-workflow-plugin/hooks/guard" ] && echo yes || echo no)"
+
 # the agents keep their boundaries
 grep -q '^tools: Read$' "$ROOT/agents/media-analyst.md" && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "FAIL: media-analyst must have only the Read tool" >&2; }
 grep -q '^disallowedTools: .*Bash' "$ROOT/agents/media-analyst.md" && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "FAIL: media-analyst must disallow Bash" >&2; }
 if grep '^tools:' "$ROOT/agents/jira-analyst.md" | grep -Eq '\b(Agent|Task)\b'; then fail=$((fail + 1)); echo "FAIL: jira-analyst must not have the Agent tool (it reads untrusted text)" >&2; else pass=$((pass + 1)); fi
 
 # permissions of the shipped scripts
-for f in bin/aw-paths bin/gh-as bin/wait-gh-login bin/wait-mcp bin/jira-attachment bin/media-prep hooks/guard; do
+for f in bin/aw-paths bin/gh-as bin/wait-gh-login bin/wait-mcp bin/jira-attachment bin/media-prep bin/kiro-install bin/kiro-permissions hooks/guard; do
   if [ -x "$ROOT/$f" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); printf 'FAIL: %s is not executable\n' "$f" >&2; fi
 done
 # the hook matcher must name exactly the Atlassian prefixes the analyst may use

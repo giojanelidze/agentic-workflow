@@ -11,6 +11,7 @@ There are two files. Both are found with `bin/aw-paths`; the agents get their ab
   - **`personal`**: `~/.claude/agentic-workflow/repos/<host>/<owner>/<repo>/config.json`, same schema. Nothing is written into the repository.
   - `none` (not set up) and `conflict` (both files exist) stop `start` and send the user to setup.
 - **Personal values** (`Local`): `~/.claude/agentic-workflow/repos/<host>/<owner>/<repo>/local.json`, always outside the repository.
+- **On Kiro** (`aw-paths --tool kiro`) the personal config `config.json`, `local.json` and `State` live under `~/.kiro/agentic-workflow/` instead (same layout); the team file in the repository is the same file for both tools. A repository can therefore be set up in both tools with different personal values.
 
 The run files (`State`) are outside the repository in both modes; see `state-schema.md`.
 
@@ -85,11 +86,15 @@ The Atlassian MCP servers cannot download attachments, so `bin/jira-attachment` 
 
 ## Supported Atlassian prefixes
 
-`mcpPrefix` must be one of these; they are exactly the Atlassian entries in the `tools:` allowlist of `agents/jira-analyst.md`, which a subagent cannot go beyond. Keep this list, that allowlist and the matcher in `hooks/hooks.json` identical. Setup offers only these and explains why it does not offer any other prefix it finds.
+`mcpPrefix` must be one of these; they are exactly the Atlassian entries in the `tools:` allowlist of `agents/jira-analyst.md`, which a subagent cannot go beyond. Keep this list, that allowlist and the matcher in `hooks/hooks.json` identical (this is the Claude Code side; Kiro has its own, below). Setup offers only these and explains why it does not offer any other prefix it finds.
 
 - `mcp__plugin_agentic-workflow_atlassian__` (the plugin's own server)
 - `mcp__claude_ai_Atlassian_Rovo__` (claude.ai connector)
 - `mcp__claude_ai_Atlassian_Rovo_2__` (a second claude.ai connector, for example another Atlassian account)
+
+## Kiro
+
+One server, `agentic-workflow-atlassian` (`https://mcp.atlassian.com/v2/mcp`, added by `bin/kiro-install`, declared again inline in the agents of the analyst and the orchestrator). In the Kiro `local.json`, `mcpPrefix` is `agentic-workflow-atlassian::`: a tool is `<mcpPrefix><tool>`, loaded with `tool_load` and run with `tool_call`. A PreToolUse hook sees the same tool as `mcp_agentic_workflow_atlassian_<tool in lower case>` (Kiro lower-cases the id and turns `-` into `_`), which is what the matcher of `kiro/hooks/agentic-workflow.json` and the guard compare. The Kiro `local.json` never has `browserPrefix` or `acceptedOrigins`, and setup never changes `jira.investigation` in a shared config. Permission rules are one marked block written by `bin/kiro-permissions`, not per stage; see `kiro/HOST.md`.
 
 ## Connection checks
 

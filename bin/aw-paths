@@ -1,7 +1,11 @@
 #!/bin/sh
 # aw-paths: where agentic-workflow keeps its files for the repository in a directory.
 #
-# usage: aw-paths [--cwd <dir>] [--get <key>]
+# usage: aw-paths [--tool claude|kiro] [--cwd <dir>] [--get <key>]
+#
+# --tool picks the tool the files belong to (default claude): the personal values, the run files and the
+# per-repository config live under that tool's own folder, so Claude Code and Kiro never share a ledger or a
+# lock. The team config in the repository (<root>/.claude/agentic-workflow.json) is the same for both.
 #
 # Prints one key=value line per fact (values may contain spaces: never eval the output):
 #   host owner repo   from `origin` (an SSH alias is resolved with `ssh -G`); the host is lower case
@@ -16,8 +20,10 @@
 #   personal_config   <base>/repos/<host>/<owner>/<repo>/config.json
 #   local             <base>/repos/<host>/<owner>/<repo>/local.json   (personal values, never in the repository)
 #   state             <base>/state/<host>/<owner>/<repo>               (run files: ledger, briefs, plans, reports)
-#   legacy            <root>/.agentic-workflow when that folder exists, else empty (older plugin versions)
-# where <base> is $HOME/.claude/agentic-workflow and owner, repo and host are lower-cased in the path.
+#   legacy            <root>/.agentic-workflow when that folder exists, else empty (older plugin versions;
+#                     always empty with --tool kiro)
+# where <base> is $HOME/.claude/agentic-workflow (--tool kiro: $HOME/.kiro/agentic-workflow) and owner, repo
+# and host are lower-cased in the path.
 # The run files have their own tree on purpose: a permission rule for <base>/state/** must never be able to
 # match local.json or config.json, whatever a repository or an owner is called (even "state").
 #
@@ -26,19 +32,25 @@
 # Plain POSIX sh; no jq or python needed.
 
 usage() {
-  echo "usage: aw-paths [--cwd <dir>] [--get <key>]" >&2
+  echo "usage: aw-paths [--tool claude|kiro] [--cwd <dir>] [--get <key>]" >&2
   exit 2
 }
 
 cwd="."
 get=""
+target="claude"
 while [ $# -gt 0 ]; do
   case "$1" in
     --cwd) [ $# -ge 2 ] || usage; cwd="$2"; shift 2 ;;
     --get) [ $# -ge 2 ] || usage; get="$2"; shift 2 ;;
+    --tool) [ $# -ge 2 ] || usage; target="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
+case "$target" in
+  claude|kiro) ;;
+  *) usage ;;
+esac
 
 # A name that ends up in a path: letters, digits, dot, underscore, hyphen; never empty, "." or "..",
 # and no leading hyphen (it must not look like an option for ssh).
@@ -129,7 +141,11 @@ if [ -z "${HOME:-}" ]; then
 fi
 
 lhost="$(lower "$host")"
-base="$HOME/.claude/agentic-workflow"
+if [ "$target" = kiro ]; then
+  base="$HOME/.kiro/agentic-workflow"
+else
+  base="$HOME/.claude/agentic-workflow"
+fi
 sub="$lhost/$(lower "$owner")/$(lower "$repo")"
 dir="$base/repos/$sub"
 team="$root/.claude/agentic-workflow.json"
@@ -145,8 +161,9 @@ else
   mode=none; config=""
 fi
 
+# Older plugin versions only ever ran in Claude Code, so Kiro has no legacy folder to migrate.
 legacy=""
-[ -d "$root/.agentic-workflow" ] && legacy="$root/.agentic-workflow"
+[ "$target" = claude ] && [ -d "$root/.agentic-workflow" ] && legacy="$root/.agentic-workflow"
 
 out="host=$lhost
 owner=$owner

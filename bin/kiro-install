@@ -1,0 +1,220 @@
+#!/bin/sh
+# kiro-install: put agentic-workflow into Kiro CLI (kiro-cli 3.x, V3 engine) from this checkout.
+#
+# usage: kiro-install [--no-mcp] [--yes] [--check] [--uninstall]
+#   (no option)  install or update; run it again after every `git pull` of this plugin
+#   --check      change nothing; list what is missing or out of date (exit 1 when anything is)
+#   --uninstall  remove what this script put there (see below) and print what it leaves
+#   --no-mcp     do not add the Atlassian MCP server (`kiro-cli mcp add`); without it the server is added
+#                only after a yes (or with --yes), and never when kiro-cli is not installed
+#   --yes        answer yes to the questions (add or remove the Atlassian server)
+#
+# What it puts where (all under ~/.kiro; nothing is written into any repository):
+#   ~/.kiro/agentic-workflow-plugin        a link to this checkout. It sits outside ~/.kiro/agentic-workflow/ on
+#                                          purpose, so a permission rule for that data tree never covers the
+#                                          plugin or its guard. The agents, the prompts and the hook call the
+#                                          plugin only through this link.
+#   ~/.kiro/agents/<agent>.md              a link to kiro/agents/<agent>.md  (Kiro follows links to agents)
+#   ~/.kiro/prompts/<prompt>.md            a COPY of kiro/prompts/<prompt>.md   (Kiro skips linked prompts)
+#   ~/.kiro/hooks/agentic-workflow.json    a COPY of kiro/hooks/agentic-workflow.json (Kiro skips linked hooks)
+#   the MCP server agentic-workflow-atlassian in Kiro's global MCP settings (kiro-cli mcp add), after a yes
+# Copies do not follow a `git pull`: run kiro-install again (--check says when they differ). What this script
+# created is listed in ~/.kiro/agentic-workflow/installed-files; a file that is not listed there and differs
+# from ours is never overwritten. It does not write permission rules: see bin/kiro-permissions.
+#
+# Exit codes: 0 ok, 1 something is missing, foreign or differs (--check) or could not be done, 2 bad usage,
+# 3 this checkout has no kiro/ folder or HOME/KIRO_HOME cannot be used. Plain POSIX sh; no jq or python.
+
+usage() {
+  echo "usage: kiro-install [--no-mcp] [--yes] [--check] [--uninstall]" >&2
+  exit 2
+}
+
+no_mcp=0; yes=0; check=0; uninstall=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-mcp) no_mcp=1; shift ;;
+    --yes) yes=1; shift ;;
+    --check) check=1; shift ;;
+    --uninstall) uninstall=1; shift ;;
+    *) usage ;;
+  esac
+done
+[ "$check" = 0 ] || [ "$uninstall" = 0 ] || usage
+
+[ -n "${HOME:-}" ] || { echo "kiro-install: HOME is not set" >&2; exit 3; }
+kh="$HOME/.kiro"
+if [ -n "${KIRO_HOME:-}" ] && [ "$KIRO_HOME" != "$kh" ]; then
+  echo "kiro-install: KIRO_HOME is set to $KIRO_HOME. The agents and the hook refer to ~/.kiro, so another Kiro home is not supported." >&2
+  exit 3
+fi
+
+src="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P)"
+ls "$src"/kiro/agents/*.md >/dev/null 2>&1 &&
+  ls "$src"/kiro/prompts/*.md >/dev/null 2>&1 &&
+  [ -f "$src/kiro/hooks/agentic-workflow.json" ] || {
+  echo "kiro-install: $src has no kiro/ folder with agents, prompts and the hook" >&2
+  exit 3
+}
+
+SERVER="agentic-workflow-atlassian"
+SERVER_URL="https://mcp.atlassian.com/v2/mcp"
+plugin_link="$kh/agentic-workflow-plugin"
+data="$kh/agentic-workflow"
+manifest="$data/installed-files"
+problems=0
+
+say() { printf '%s\n' "$*"; }
+problem() { problems=$((problems + 1)); say "  PROBLEM: $*"; }
+
+owned() { # kind path
+  [ -f "$manifest" ] && grep -Fxq "$1 $2" "$manifest"
+}
+record() { # kind path
+  owned "$1" "$2" && return 0
+  mkdir -p "$data" && printf '%s %s\n' "$1" "$2" >> "$manifest"
+}
+forget() { # kind path
+  [ -f "$manifest" ] || return 0
+  grep -Fvx "$1 $2" "$manifest" > "$manifest.tmp" 2>/dev/null; mv "$manifest.tmp" "$manifest"
+}
+
+confirm() { # question
+  [ "$yes" = 1 ] && return 0
+  [ -t 0 ] || return 1
+  printf '%s [y/N] ' "$1"
+  read -r ans
+  case "$ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+mcp_present() {
+  [ -f "$kh/settings/mcp.json" ] && grep -q "\"$SERVER\"" "$kh/settings/mcp.json"
+}
+
+# The items, one per line as "kind<TAB>source<TAB>destination" (the paths may contain spaces).
+TAB="$(printf '\t')"
+items() {
+  printf 'plugin\t%s\t%s\n' "$src" "$plugin_link"
+  for f in "$src"/kiro/agents/*.md; do printf 'link\t%s\t%s\n' "$f" "$kh/agents/${f##*/}"; done
+  for f in "$src"/kiro/prompts/*.md; do printf 'copy\t%s\t%s\n' "$f" "$kh/prompts/${f##*/}"; done
+  printf 'copy\t%s\t%s\n' "$src/kiro/hooks/agentic-workflow.json" "$kh/hooks/agentic-workflow.json"
+}
+
+# --- one item: state is ok | missing | changed | foreign -------------------------------------
+state_of() { # kind source destination
+  kind="$1"; s="$2"; d="$3"
+  case "$kind" in
+    plugin|link)
+      if [ -L "$d" ]; then
+        if [ "$(readlink "$d")" = "$s" ]; then echo ok
+        elif [ "$kind" = plugin ] || owned link "$d"; then echo changed
+        else echo foreign; fi
+      elif [ -e "$d" ]; then echo foreign
+      else echo missing; fi ;;
+    copy)
+      if [ -L "$d" ]; then echo foreign
+      elif [ -f "$d" ]; then
+        if cmp -s "$s" "$d"; then echo ok
+        elif owned copy "$d"; then echo changed
+        else echo foreign; fi
+      elif [ -e "$d" ]; then echo foreign
+      else echo missing; fi ;;
+  esac
+}
+
+# --- check -------------------------------------------------------------------------------------
+if [ "$check" = 1 ]; then
+  items | while IFS="$TAB" read -r kind s d; do
+    st="$(state_of "$kind" "$s" "$d")"
+    [ "$st" = ok ] || say "$st: $d"
+  done > "${TMPDIR:-/tmp}/kiro-install.$$" 2>&1
+  out="$(cat "${TMPDIR:-/tmp}/kiro-install.$$")"; rm -f "${TMPDIR:-/tmp}/kiro-install.$$"
+  [ -n "$out" ] && say "$out"
+  bad=0; [ -n "$out" ] && bad=1
+  if [ ! -x "$plugin_link/hooks/guard" ]; then say "missing: $plugin_link/hooks/guard (is the plugin link in place?)"; bad=1; fi
+  if [ "$no_mcp" = 0 ] && ! mcp_present; then say "missing: the MCP server $SERVER (run kiro-install, or: kiro-cli mcp add --name $SERVER --url $SERVER_URL --scope global)"; bad=1; fi
+  if [ "$bad" = 0 ]; then say "kiro-install: everything is in place"; exit 0; fi
+  exit 1
+fi
+
+# --- uninstall ---------------------------------------------------------------------------------
+if [ "$uninstall" = 1 ]; then
+  items | while IFS="$TAB" read -r kind s d; do
+    st="$(state_of "$kind" "$s" "$d")"
+    case "$kind:$st" in
+      plugin:ok|link:ok) rm -f "$d"; forget "$kind" "$d"; say "removed: $d" ;;
+      link:changed) rm -f "$d"; forget link "$d"; say "removed: $d (it pointed to another folder)" ;;
+      copy:ok) rm -f "$d"; forget copy "$d"; say "removed: $d" ;;
+      copy:changed) say "left: $d (it was changed after it was installed; remove it by hand if you want it gone)" ;;
+      *:foreign) say "left: $d (not installed by kiro-install)" ;;
+      *:missing) : ;;
+      plugin:changed) say "left: $d (it points to another checkout; run kiro-install --uninstall from that one)" ;;
+    esac
+  done
+  rmdir "$kh/agents" "$kh/prompts" "$kh/hooks" 2>/dev/null
+  if [ -f "$manifest" ] && [ ! -s "$manifest" ]; then rm -f "$manifest"; fi
+  rmdir "$data" 2>/dev/null
+  if mcp_present && command -v kiro-cli >/dev/null 2>&1; then
+    if confirm "Remove the MCP server $SERVER from Kiro's global settings?"; then
+      kiro-cli mcp remove --name "$SERVER" --scope global || say "  (kiro-cli mcp remove failed; remove $SERVER from $kh/settings/mcp.json by hand)"
+    else
+      say "left: the MCP server $SERVER (kiro-cli mcp remove --name $SERVER --scope global)"
+    fi
+  fi
+  say ""
+  say "Not touched: the permission rules (run bin/kiro-permissions remove in $src) and the data folder $data"
+  say "(configuration of repositories set up on Kiro, run files, hook markers, implementer memory)."
+  exit 0
+fi
+
+# --- install -----------------------------------------------------------------------------------
+say "Installing agentic-workflow into $kh from $src"
+items > "${TMPDIR:-/tmp}/kiro-install.items.$$"
+while IFS="$TAB" read -r kind s d; do
+  st="$(state_of "$kind" "$s" "$d")"
+  case "$st" in
+    ok)
+      record "$kind" "$d"
+      say "  ok: $d" ;;
+    missing|changed)
+      mkdir -p "$(dirname "$d")" || { problem "cannot create $(dirname "$d")"; continue; }
+      case "$kind" in
+        plugin|link) ln -sfn "$s" "$d" || { problem "cannot link $d"; continue; } ;;
+        copy) cp "$s" "$d" || { problem "cannot copy to $d"; continue; } ;;
+      esac
+      record "$kind" "$d"
+      say "  $( [ "$st" = changed ] && echo updated || echo installed ): $d" ;;
+    foreign)
+      problem "$d exists and was not installed by kiro-install; move it away and run kiro-install again" ;;
+  esac
+done < "${TMPDIR:-/tmp}/kiro-install.items.$$"
+rm -f "${TMPDIR:-/tmp}/kiro-install.items.$$"
+
+if [ "$no_mcp" = 0 ]; then
+  if mcp_present; then
+    say "  ok: the MCP server $SERVER is configured"
+  elif ! command -v kiro-cli >/dev/null 2>&1; then
+    say "  note: kiro-cli is not on PATH, so the MCP server was not added. Run: kiro-cli mcp add --name $SERVER --url $SERVER_URL --scope global"
+  elif confirm "Add the Atlassian MCP server ($SERVER_URL) to Kiro's global settings as $SERVER?"; then
+    kiro-cli mcp add --name "$SERVER" --url "$SERVER_URL" --scope global && say "  added: the MCP server $SERVER" ||
+      problem "kiro-cli mcp add failed; run it by hand: kiro-cli mcp add --name $SERVER --url $SERVER_URL --scope global"
+  else
+    say "  skipped: the MCP server. Add it later with: kiro-cli mcp add --name $SERVER --url $SERVER_URL --scope global"
+  fi
+fi
+
+if [ "$problems" -gt 0 ]; then
+  say ""; say "kiro-install: $problems problem(s) above; nothing was overwritten."
+  exit 1
+fi
+say ""
+say "Done. Next:"
+say "  1. Allow the plugin's own read commands, so that Kiro does not ask before every one (it adds allow rules only;"
+say "     add the word print instead of apply to see them first):"
+say "       ~/.kiro/agentic-workflow-plugin/bin/kiro-permissions apply"
+say "  2. Open kiro-cli in your project, trust the workspace (hooks and agents load only in a trusted workspace) and start"
+say "     the orchestrator:   kiro-cli --agent agentic-workflow"
+say "  3. Sign in to the Atlassian server with /mcp (it is called $SERVER)."
+say "  4. Run /agentic-workflow-setup once per repository; at the end of each stage it prints the kiro-permissions command"
+say "     that adds your GitHub account and the picture rules."
+say "After a git pull of this plugin, run kiro-install again (the prompts and the hook are copies)."
