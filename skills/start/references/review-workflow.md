@@ -24,7 +24,8 @@ prepare round n:  diff.patch, changed-files.txt (+ delta.patch from round 2)
          \____________\___________/____________/
                           |
                           v
-                   review-aggregator  ->  review/round-<n>/summary.md
+                   review-aggregator  ->  reply; the orchestrator saves
+                          |               review/round-<n>/summary.md
                           |
    +----------------------+--------------------------+-----------------------------+
    | approve              | [secret] blocker         | changes_required, n < 3     | changes_required, n = 3
@@ -42,7 +43,7 @@ Create `<State>/<KEY>/review/round-<n>/` and write, with Bash, to these absolute
 - `changed-files.txt`: `git diff --name-status origin/<base>...HEAD`.
 - Round 2 and up, `delta.patch`: `git diff -U10 <sha of round n-1>..HEAD -- . $LOCKS`. It is what the reviewers look at when they re-review.
 
-Record the round in `state.json.reviewRounds` as `{"n": <n>, "sha": "<HEAD>", "verdict": null}`: append it, or replace the entry with the same `n` when a round restarts. The round count is the length of that list. The orchestrator writes these files because the reviewers have no Bash and no Write.
+Record the round in `state.json.reviewRounds` as `{"n": <n>, "sha": "<HEAD>", "verdict": null}`: append it, or replace the entry with the same `n` when a round restarts. The round count is the length of that list. The orchestrator writes these files because the reviewers and the aggregator have no Bash and no Write.
 
 ## 3. Run the four reviewers in parallel
 In **one message** start `agentic-workflow:correctness-reviewer`, `conventions-reviewer`, `security-reviewer` and `performance-reviewer` (no `model` parameter), all with the same prompt:
@@ -57,7 +58,7 @@ Files: <State>/<KEY>/review/round-<n>/ (diff.patch, changed-files.txt[, delta.pa
 
 Each reviewer starts with a fresh context and receives only the task description (`brief.md`, `plan.md`, the task specs), the change and read access to the repository. It never gets the implementer's reasoning or `implementation.md`, so that it judges the result independently and does not inherit the implementer's blind spots. It cannot modify anything: its tools are Read, Grep and Glob. This is the one place in `start` where agents run in parallel; wait for all four before going on.
 
-Because reviewers cannot write files, the orchestrator saves each reply **verbatim** as `review/round-<n>/<reviewer-name>.md`, after validating it:
+Because reviewers cannot write files (and Claude Code refuses a subagent's Write to a file named `report*`, `summary*`, `findings*` or `analysis*` `.md` in any case), the orchestrator saves each reply **verbatim** as `review/round-<n>/<reviewer-name>.md`, after validating it:
 - the first line is `# <reviewer-name> report`, and `**Round:**` equals `<n>`;
 - the `**Findings:**` line matches `^\*\*Findings:\*\* (\d+) blocker, (\d+) suggestion, (\d+) nit$` and the counts equal the number of `### [blocker]`, `### [suggestion]` and `### [nit]` headings under `## Findings` (which holds `No findings.` when all three are 0);
 - in round 2 and up `## Previous blockers` is present and has a line for every blocker of the previous summary that names this reviewer in `Reported by`;
@@ -66,12 +67,20 @@ Because reviewers cannot write files, the orchestrator saves each reply **verbat
 A malformed reply is re-run once (that reviewer only). A second failure, or a `BLOCKED: <reason>` reply, ends the stage: write `blocked.md` and stop.
 
 ## 4. Aggregate
-Run `agentic-workflow:review-aggregator` with `<KEY>`, `<n>` and the `State:` line. It reads the four reports (and, from round 2, the previous summary) and writes `review/round-<n>/summary.md`:
+Run `agentic-workflow:review-aggregator` with `<KEY>`, `<n>` and the `State:` line. It reads the four reports (and, from round 2, the previous summary) and **replies with the summary**; it has only Read, because Claude Code refuses a subagent's Write to `summary.md`. The orchestrator saves the reply as `review/round-<n>/summary.md`. That file is the orchestrator's to write, so it never asks the user for permission to do so.
 - duplicates are merged: the same file, overlapping lines and the same fix; the higher severity wins and every reporter is listed;
 - every previous blocker that a reviewer still reports `unresolved` (or did not mention) stays a blocker of this round, listed once;
 - `Verdict` is `changes_required` if at least one blocker exists, otherwise `approve`;
 - it adds no findings and does not look at the code.
-Set `reviewRounds[n].verdict` from the summary.
+
+Before saving, remove harmless wrapping that does not change the content: an outer code fence around the whole reply, text before the `# Review summary` line, and a trailing `STATUS:` line. Only structural errors count as malformed. Validate:
+- the first line is `# Review summary`, `**Verdict:**` is `approve` or `changes_required`, and `**Round:**` is `<n> of 3`;
+- `**Totals:**` matches `^\*\*Totals:\*\* (\d+) blocker, (\d+) suggestion, (\d+) nit$` and the counts equal the number of `###` headings under `## Blockers`, `## Suggestions` and `## Nits` (a section that holds `None.` counts 0);
+- the verdict follows from the blocker count (`changes_required` exactly when there is at least one blocker);
+- `## Escalation` is present exactly when `n` is 3 and there is at least one blocker;
+- nothing sits outside the summary after the wrapping is removed.
+
+Then save the text verbatim. A malformed reply is re-run once (the aggregator only); a second failure, or a `BLOCKED: <reason>` reply, ends the stage: write `blocked.md` and stop. Set `reviewRounds[n].verdict` from the summary.
 
 ## 5. Verdict
 - **A `[secret]` blocker** (a credential in the diff): always stop, even with `--auto`. A secret that is committed stays in git history even if the next commit removes it, and the `pr-publisher` scan only looks at the net diff, so a fix loop would not solve it. Write `blocked.md` (file and line, never the value) and tell the user to rewrite the history and rotate the credential.
@@ -94,7 +103,7 @@ All under `<State>/<KEY>/review/round-<n>/`, which is outside the repository.
 |---|---|
 | `diff.patch`, `changed-files.txt`, `delta.patch` | orchestrator |
 | `<reviewer-name>.md` (four) | orchestrator, verbatim reply of the read-only reviewer |
-| `summary.md` | `review-aggregator` |
+| `summary.md` | orchestrator, verbatim reply of `review-aggregator` |
 
 Formats: `report-formats.md`. State: `state-schema.md` (`lastCheckSha`, `reviewRounds`, `reviewOverride`).
 

@@ -2,7 +2,7 @@
 
 The orchestrator and agents parse these headings, so keep them exact.
 
-Stage agents (all but `jira-analyst`, `media-analyst` and the four reviewers) end their reply with: `STATUS: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED` plus one sentence. The reviewers reply with their report only (see `review/round-<n>/<reviewer>.md`), and so does the `media-analyst` (see `media/<hash>/findings-<n>.md`).
+Stage agents (all but `jira-analyst`, `media-analyst`, the four reviewers and `review-aggregator`) end their reply with: `STATUS: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED` plus one sentence. The reviewers reply with their report only (see `review/round-<n>/<reviewer>.md`), `review-aggregator` with its summary only (see `review/round-<n>/summary.md`), and so does the `media-analyst` (see `media/<hash>/findings-<n>.md`). The orchestrator validates and saves each of these replies.
 
 ## jira-analyst result (final message: one JSON block)
 - `{"result":"READY","id","url","brief","confidence"}`
@@ -111,7 +111,7 @@ The reviewer's whole reply, saved verbatim by the orchestrator. No `STATUS:` lin
 - `Verdict` is `changes_required` if at least one blocker exists, otherwise `approve`. Totals count the headings of each section; a previous blocker that is still unresolved counts as a blocker of the round, once.
 - An empty section is the single line `None.`. A heading may begin with tags (`### [secret] <summary>`, `### [out-of-focus] <summary>`) and a carried-over blocker ends with ` (unresolved from round <m>)`, `<m>` being the round that first raised it. The orchestrator stops the run on a `[secret]` blocker.
 - `## Escalation` exists only in round 3 with blockers remaining, as the last section: the open blockers, one line each, for a human.
-- The aggregator ends its reply with `STATUS: DONE | BLOCKED` plus one sentence.
+- The aggregator replies with the summary only (no `STATUS:` line), or with `BLOCKED: <reason>`; the orchestrator validates the reply and saves it as `summary.md`.
 
 ## pr.md (pr-publisher)
 PR URL (or compare URL), final title and body, the URL of the review comment (or its text when it could not be posted), CI results.
