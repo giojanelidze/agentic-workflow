@@ -968,5 +968,35 @@ for p in plugin_agentic-workflow_atlassian claude_ai_Atlassian_Rovo claude_ai_At
   grep -q "mcp__${p}__" "$ROOT/agents/jira-analyst.md" && grep -q "$p" "$ROOT/hooks/hooks.json" && pass=$((pass + 1)) || { fail=$((fail + 1)); printf 'FAIL: prefix %s missing from jira-analyst tools or hooks.json\n' "$p" >&2; }
 done
 
+# No AI attribution: the rule must stay in the two agents that write commits and PR texts, and the check that
+# pr-publisher runs before a push must flag exactly the commits that carry such a line (the command is taken
+# from the agent file itself, so the test cannot drift from the text).
+IMPL="$(cat "$ROOT/agents/implementer.md")"
+PUBL="$(cat "$ROOT/agents/pr-publisher.md")"
+contains "implementer: commits with -F from a file" 'git commit -F <State>/<KEY>/commit-msg.txt' "$IMPL"
+contains "implementer: no Co-Authored-By line" 'no `Co-Authored-By` trailer' "$IMPL"
+contains "implementer: reads the commit back" 'git log -1 --format=%B' "$IMPL"
+contains "pr-publisher: no AI attribution rule" '- No AI attribution.' "$PUBL"
+contains "pr-publisher: bodies go through a file" '--body-file' "$PUBL"
+contains "pr-publisher: checks the commits before a push" '- Attribution check before every push' "$PUBL"
+contains "pr-publisher: never rewrites history" 'You never rewrite history' "$PUBL"
+contains "start: attribution is an always-stop" 'carries an AI attribution line' "$(cat "$ROOT/skills/start/SKILL.md")"
+ATT="$TMP/attribution"
+mkrepo "$ATT" ""
+git -C "$ATT" -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m base
+git -C "$ATT" update-ref refs/remotes/origin/main HEAD
+attc() { git -C "$ATT" -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m "$1"; }
+attc "clean commit"
+attc "$(printf 'trailer\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>')"
+attc "$(printf 'lower case trailer\n\nco-authored-by: claude sonnet <x@y.z>')"
+attc "$(printf 'generated\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)')"
+attc "$(printf 'session\n\nClaude-Session: https://claude.ai/code/session_abc')"
+attc "$(printf 'human\n\nCo-Authored-By: Jane Doe <jane@example.com>')"
+attc "docs: explain why the Co-Authored-By: Claude and Generated with Claude Code lines are removed"
+ATTCMD="$(sed -n 's/.*`\(git log -i -E[^`]*\)`.*/\1/p' "$ROOT/agents/pr-publisher.md" | sed 's|<base>|main|')"
+contains "attribution check: the command is found in pr-publisher.md" 'origin/main..HEAD' "$ATTCMD"
+ATTHITS="$(cd "$ATT" && sh -c "$ATTCMD" | sed 's/^[0-9a-f]* //' | sort | tr '\n' ',')"
+eq "attribution check flags the four attributed commits and nothing else" "generated,lower case trailer,session,trailer," "$ATTHITS"
+
 printf '%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

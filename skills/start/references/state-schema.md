@@ -33,6 +33,8 @@ Which config applies (`mode`) is derived from which files exist: the repository 
 | `<KEY>/plan.md`, `<KEY>/tasks/<n>-<slug>.md` | `implementation-planner` | plan index and one detailed spec per task (the orchestrator may only delete the specs of tasks that are not done, before a re-plan) |
 | `<KEY>/baseline-report.md`, `test-report.md` | `test-runner` | check results |
 | `<KEY>/implementation.md` | `implementer` | per-task log |
+| `<KEY>/commit-msg.txt` | `implementer` | the message of the commit being made, overwritten for every commit and passed to `git commit -F` after a check that it has no AI attribution line |
+| `<KEY>/pr-body.txt`, `review-comment.txt` | `pr-publisher` | the texts passed to GitHub with `--body-file`, checked for AI attribution lines first |
 | `<KEY>/review/round-<n>/diff.patch`, `changed-files.txt`, `delta.patch` | orchestrator | the change handed to the reviewers (the reviewers and the aggregator have no Bash or Write) |
 | `<KEY>/review/round-<n>/<reviewer>.md` | orchestrator | the verbatim reply of one of the four read-only reviewers |
 | `<KEY>/review/round-<n>/summary.md` | orchestrator | the verbatim reply of `review-aggregator`: merged findings and the verdict of the round |

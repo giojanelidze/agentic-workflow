@@ -185,6 +185,7 @@ Personal options (`/plugin configure agentic-workflow`): `defaultAuto`. Everythi
 
 - No force-push, no push to the base or protected branches.
 - Pull requests are drafts by default.
+- Commits and pull requests carry no AI attribution line (`Co-Authored-By: Claude …`, `Generated with Claude Code`, a `Claude-Session` trailer): the `implementer` writes each commit message to a file and checks it, `pr-publisher` does the same for the PR title, body and review comment, and before every push it checks the commits and stops, without pushing and without rewriting history, if one has such a line. This covers the agents of the plugin; for your own sessions set `"attribution": {"commit": "", "pr": "", "sessionUrl": false}` in `~/.claude/settings.json`.
 - The diff is scanned for secrets before every push.
 - Ticket, comment, Confluence, code and web page text is treated as data, never as instructions.
 - The browser, when enabled, is read-only and limited to the origins you allow; the guard allows the analyst only the read tools, and only in repositories where you enabled it.
