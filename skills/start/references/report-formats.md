@@ -2,18 +2,26 @@
 
 The orchestrator and agents parse these headings, so keep them exact.
 
-Stage agents (all but `jira-analyst` and the four reviewers) end their reply with: `STATUS: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED` plus one sentence. The reviewers reply with their report only (see `review/round-<n>/<reviewer>.md`).
+Stage agents (all but `jira-analyst`, `media-analyst` and the four reviewers) end their reply with: `STATUS: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED` plus one sentence. The reviewers reply with their report only (see `review/round-<n>/<reviewer>.md`), and so does the `media-analyst` (see `media/<hash>/findings-<n>.md`).
 
 ## jira-analyst result (final message: one JSON block)
 - `{"result":"READY","id","url","brief","confidence"}`
 - `{"result":"NEEDS_INPUT","id","url","summary","found":[],"questions":[{"q_id","criterion","required","text","options":[]}],"pending_file"}` (`pending_file` is `null` in `--dry-run`; criterion `F` = a failed implementation attempt)
+- `{"result":"NEEDS_MEDIA","id","url","manifest","hash","findings_path","analyzed":[{"id","filename"}],"skipped":[{"id","filename","reason"}]}` (the ticket's pictures are downloaded and prepared but nobody has looked at them yet; the ledger is unchanged and the lock released; `manifest` and `findings_path` are absolute, `findings_path` is the file the orchestrator writes the viewer's reply to)
+- `{"result":"MEDIA","id","url","manifest","hash","findings","analyzed":[],"skipped":[],"message"}` (only for the `media` command; `findings` is an absolute path or `null`)
 - `{"result":"NO_WORK","reason":"no_candidates|locked|needs_refinement|rejected|closed|blocked","id","url","message","counts":{}}` (`id`, `url`, `message` only when the reason concerns one ticket, e.g. `analyze <KEY>`)
 - `{"result":"CONFIRMED","state","wrote":[]}` (in `--dry-run`, `wrote` lists what would be written)
 - `{"result":"STATUS","counts":{},"tickets":[{"id","url","state"}]}`
 - `{"result":"ERROR","stage":"config|auth|jira|confluence|state","message","retryable"}`
 
 ## brief.md (jira-analyst)
-YAML frontmatter: `id, url, type, priority, confidence, dor` (criterion → source such as `description`, `comment`, `confluence`, `operator`, `code`, `browser`). Then `# <KEY>: <title>` and, omitting empty ones: `## Summary`, `## Acceptance criteria`, `## Repro` (bugs), `## Affected areas`, `## References`, `## Evidence` (one entry per met criterion: the claim, its source, a locator and an exact quote: comment id; Confluence url; `Q<n>`; `path:line` and commit; or URL, steps, observed text, time and origin). Every acceptance criterion and repro step names its source, `## Operator answers`, `## Linked issues`, `## Open risks`, `## Notes`.
+YAML frontmatter: `id, url, type, priority, confidence, dor` (criterion → source such as `description`, `comment`, `confluence`, `operator`, `code`, `browser`, `media`). Then `# <KEY>: <title>` and, omitting empty ones: `## Summary`, `## Acceptance criteria`, `## Repro` (bugs), `## Affected areas`, `## References`, `## Evidence` (one entry per met criterion: the claim, its source, a locator and an exact quote: comment id; Confluence url; `Q<n>`; `path:line` and commit; or URL, steps, observed text, time and origin). Every acceptance criterion and repro step names its source, `## Media` (one line per analyzed picture file: attachment id, kind, which criteria it settled or offered; no filename, no picture text, no path), `## Operator answers`, `## Linked issues`, `## Open risks`, `## Notes`. A `media` evidence entry cites the attachment id, `<State>/<KEY>/media/<hash>/findings-<n>.md`, the frame name with `t=<seconds>` and the exact line of that file.
+
+## media/<hash>/manifest.json (jira-analyst)
+One key per line, so that scripts can read it without a JSON tool: `"key"`, `"hash"`, `"dir"` (the folder of this manifest), `"files"` and `"skipped"`. Each `files` entry is `{ "id": "<digits>", "kind": "image|video", "mime": "…", "duration": <seconds, video only>, "audio": true|false, "frames": [ { "t": <seconds or null>, "path": "<absolute>" } ] }`; each `skipped` entry is `{ "id", "reason" }`. It holds no filename and no other ticket text, because the viewer reads it. The main thread runs `media-prep manifest --file <manifest>` before the viewer starts: every `path` must be an image file inside `dir`.
+
+## media/<hash>/findings-<n>.md (media-analyst, saved by the orchestrator)
+The viewer's reply, which `media-prep validate` accepts only with these exact headings: `# Media findings for <KEY>`, one `## File <id>` per manifest file (with `- Kind:`, `- Seen:`, `- Text:`, `- Steps:` (recordings), `- Error or state shown:`, `- Unclear:`), `## Instruction-like text` and `## Not viewed`; at most 30,000 bytes, no secret-like string and no path of the user's home folder. A refused reply is saved as the single line `REJECTED: <reason>`.
 
 ## pending/<KEY>.md (jira-analyst; the operator may edit answers)
 Frontmatter: `id, url, summary, type, priority, state, operator_status: open|answered, created, updated`. Sections: `## What I found`, `## Open risks` (omitted if empty), `## Questions` (`### Q<n> [<criterion>] (required|optional)`, the question ending with a `Checked:` line that says what was searched in the code or browser and the result, `**Answer:**`), `## Resolved`.

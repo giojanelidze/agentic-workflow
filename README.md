@@ -21,13 +21,14 @@ Jira board (your assigned tickets)
   -> jira-analyst            PR comment + transition, within your writeMode
 ```
 
-The `start` skill runs in the main conversation and orchestrates the agents. Agents hand work to each other through files in a run folder under `~/.claude/agentic-workflow/` (keyed by the repository's `origin`), outside your repository. Only the main thread talks to you, and only `jira-analyst` touches Jira and Confluence.
+The `start` skill runs in the main conversation and orchestrates the agents. Agents hand work to each other through files in a run folder under `~/.claude/agentic-workflow/` (keyed by the repository's `origin`), outside your repository. Only the main thread talks to you, and only `jira-analyst` touches Jira and Confluence (with picture analysis on it also downloads a ticket's attachments, with your own API token).
 
 ## Prerequisites
 
 - Claude Code with plugin support.
 - `gh` CLI, logged in with an account that can write to the repository (`gh auth login`). Setup binds the repository to one of the logged-in accounts and every gh call then runs as that account through the plugin's `gh-as` wrapper, without ever changing gh's active account, so other terminals are not affected. Without `gh`, or without that binding, the run still pushes and writes the PR text to `pr.md`.
 - An Atlassian account with access to your Jira site. Jira is reached through an Atlassian MCP server: either your claude.ai Atlassian connector (if you have one) or the server this plugin ships. Claude Code hides the plugin's server when a connector with the same URL exists, so setup finds whichever is available and stores its tool prefix. You authorize once in the browser; the token is stored and refreshed for you.
+- Optional, for picture analysis: an Atlassian API token of your own (setup stores it in the macOS keychain, never in a file) and `ffmpeg` for screen recordings (`brew install ffmpeg`; screenshots work without it). macOS only in this version.
 - Optional: [superpowers](https://github.com/obra/superpowers). The implementer uses its TDD skill when available and works without it.
 
 ## Install
@@ -72,6 +73,7 @@ Setup is the only writer of the configuration and of your personal values, and C
 /agentic-workflow:start --auto           skip the checkpoints
 /agentic-workflow:start --dry-run        analysis only; nothing is written to Jira
 /agentic-workflow:start --status         show where every known ticket stands
+/agentic-workflow:media ABC-123          what the screenshots and recordings of a ticket show (Jira is not written)
 /agentic-workflow:start ABC-123 --from review
 ```
 
@@ -93,6 +95,17 @@ Before it asks you a question, `jira-analyst` tries to answer it from facts:
 - **Browser** (off by default): with [Claude in Chrome](https://code.claude.com/docs/en/chrome) and a non-production `appUrl` set in `/agentic-workflow:setup`, it opens that app read-only to check a repro or the actual behavior. It never types, logs in, submits forms or leaves the allowed origins.
 
 A fact counts only with evidence: for every criterion it marks as met, `brief.md` carries an `## Evidence` entry with the source and an exact quote (ticket text, comment id, Confluence page, your own answer, `path:line` and commit, or URL, steps and observed text). The analyst never adds acceptance criteria or repro steps the sources do not state, and before every handoff it re-checks each quote against the repo and the fetched text. Code shows what the app does, never what it should do, so expected behavior, acceptance criteria and design decisions are always asked. Anything it cannot prove (including "could not reproduce") comes back to you as a question that ends with a `Checked:` line saying what was tried.
+
+## Pictures and recordings
+
+Bug reports often live in a screenshot or a screen recording attached to the ticket. When you switch picture analysis on in `/agentic-workflow:setup` (it is off by default), the plugin can look at them:
+
+- `/agentic-workflow:media ABC-123` downloads the ticket's images and videos with your own Atlassian API token, splits videos into a few frames taken at the scene changes, and prints what a model sees: the kind of picture, the text it can read, the steps shown in a recording with their times, and an error or state shown. It writes nothing to Jira.
+- `/agentic-workflow:start` does the same on its own when the ticket text is not enough to judge the ticket (`jira.media.auto`).
+- The Atlassian server cannot download attachments, so `bin/jira-attachment` does it. The token is kept in the system keychain only. The download address is built from your Jira site and a numeric attachment id, never from a link in the ticket, and files are accepted by their real content type, not their name.
+- The pictures are looked at by a separate agent, `media-analyst`, that can only read and sees no ticket text. What it reports is data: it never settles more than the existence of evidence (B4) and the actual behavior (B2) when the ticket is silent or agrees; steps seen in a recording and mockups are offered to you as answer options in a question, never taken as facts. The planner and the implementer never open the pictures, and nothing from them goes into Jira comments or the pull request.
+- It costs time and tokens: each ticket with pictures needs a second analyst pass and the viewer, and `--dry-run` also downloads and looks at the pictures (it still writes nothing to Jira). The downloads stay in the run folder until you delete the ticket's folder at the end of a run.
+- Honest limits: a recording is a sample of frames, not watched in full; sound is not heard; a model can misread small text; recordings need `ffmpeg`; only still images and videos attached to the ticket (not links to Loom or YouTube).
 
 ## Planning
 
@@ -146,7 +159,7 @@ Personal options (`/plugin configure agentic-workflow`): `defaultAuto`. Everythi
 - The browser, when enabled, is read-only and limited to the origins you allow; the guard allows the analyst only the read tools, and only in repositories where you enabled it.
 - Jira writes go through one agent, within the `writeMode` you chose, and are enforced per repository by the plugin's guard hook, never by user-level deny rules. If you disable hooks (`disableAllHooks`), Jira writes and the browser fall back to asking for permission on every call.
 - Setup writes only `allow` rules, and only for what is the same in every repository.
-- No tokens or secrets are stored by the plugin; authorization is handled by Claude Code.
+- The plugin stores no tokens or secrets in files; authorization is handled by Claude Code. The one exception is opt-in: with picture analysis on, your Atlassian API token lives in the macOS keychain (stored by `jira-attachment login`). Any program that runs on your computer as you can read a keychain item that `security` created, including the commands a run executes, so prefer a token with scopes (read-only) when your Atlassian plan offers it, and remove it any time: `jira-attachment logout --email <you>` (that script is on the Bash tool's `PATH` only while the plugin is enabled), or in any terminal `security delete-generic-password -s agentic-workflow-atlassian -a <you>`; revoke the token itself on the Atlassian account's API-token page.
 
 ## Roadmap
 

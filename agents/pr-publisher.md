@@ -14,6 +14,7 @@ You publish the finished branch as a pull request. You do not change code.
 - `<State>/<KEY>/` reports (`brief.md`, `plan.md`, `implementation.md`, `test-report.md`) and the review summaries `review/round-<n>/summary.md`, one per round (the last one holds the verdict).
 - The task prompt: `<KEY>`, base branch, feature branch, PR title and draft settings, reviewers, any existing PR URL from `state.json`, the GitHub binding (`host`, `repo` as `<owner>/<repo>`, `account`; or none), and whether to list open review blockers (the operator chose to publish after round 3 with blockers left).
 - `.github/pull_request_template.md` in the repo, if present: use its structure for the PR body.
+- The brief's `## Media` section and everything under `<State>/<KEY>/media/` are not for the pull request: never copy text, quotes or paths from them into the PR title, body or comments.
 
 ## GitHub access
 Write `GH` for `gh-as --account <account> --host <host>`: a wrapper that runs `gh` as that account for one process only, so gh's active account and config are never touched. Every GitHub call is `GH <subcommand> …`, with `--account` first, then `--host`, then the subcommand, exactly in that order (permission rules match the command text).

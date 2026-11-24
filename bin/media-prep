@@ -1,0 +1,328 @@
+#!/bin/sh
+# media-prep: turn a downloaded image or video into files a model can look at with the Read tool.
+#
+# usage:
+#   media-prep check
+#   media-prep auto  --in <file> --out <dir> --max-frames <N> [--width <W>] [--remove-input]
+#   media-prep image --in <file> --out <dir>
+#   media-prep video --in <file> --out <dir> --max-frames <N> [--width <W>] [--remove-input]
+#   media-prep pick  --duration <seconds> --max-frames <N> [<candidate time> ...]
+#   media-prep hash  <id:size:created> ...
+#   media-prep validate --manifest <manifest.json> --file <findings file>
+#   media-prep manifest --file <manifest.json>
+#
+# Output (stdout):
+#   check   `ffmpeg yes|no`, `ffprobe yes|no`, `sips yes|no`, one per line; exit 0 when videos can be read
+#   image   `view <path>` (the file itself, or a PNG converted from HEIC/TIFF/BMP), or `video` for an animated GIF
+#   video   `frame <seconds> <path>` for each frame, then `frames <n> duration <seconds> audio yes|no`
+#   auto    whatever `image` or `video` prints for the file's real type
+#   pick    the chosen frame times, one per line (the selection rule, usable without ffmpeg)
+#   hash    16 hex characters identifying a set of attachments (order does not matter; names are not part of it)
+#   validate `ok`, or `rejected <reason>` (exit 5): the reply of the image viewer may become a findings file only
+#           when it has the fixed headings, mentions only files of its manifest, stays small and carries no
+#           secret-like string and no path of this user's home folder
+#   manifest `ok`, or `rejected <reason>` (exit 5): every picture path of the manifest is a regular image file inside
+#           the manifest's own folder (`dir`), so the viewer is never pointed at another file
+# Exit codes: 0 ok, 1 `check`: videos not supported, 5 refused or unreadable file (type, format, too long,
+# no frames) or a rejected findings reply, 64 bad usage, 127 ffmpeg or ffprobe is missing.
+#
+# The file is untrusted. The type is decided by its content (`file`, then ffprobe's container name against a
+# whitelist), never by its name; ffmpeg gets `-protocol_whitelist file`, the demuxer pinned with `-f`, no stdin
+# and a time limit, so a playlist or script disguised as a video cannot make it read other files or the network.
+# Frames are JPEGs named t<seconds>.jpg, at most --width pixels wide. --remove-input deletes the source video
+# after the frames exist, and only when its path has a `raw` folder component.
+# Plain POSIX sh plus awk, `file`, ffmpeg/ffprobe (videos) and sips (macOS, HEIC). No jq or python.
+
+LC_ALL=C; export LC_ALL   # awk prints decimal points, not commas
+MAX_SECONDS=600        # longer videos are refused
+SCENE=0.02             # ffmpeg scene-change threshold: screen recordings change little between frames
+
+usage() {
+  echo "usage: media-prep check | auto|video --in <file> --out <dir> --max-frames <N> [--width <W>] [--remove-input] | image --in <file> --out <dir> | pick --duration <s> --max-frames <N> [<time> ...] | hash <id:size:created> ... | validate --manifest <file> --file <file> | manifest --file <file>" >&2
+  exit 64
+}
+fail() { # code message
+  printf 'media-prep: %s\n' "$2" >&2
+  exit "$1"
+}
+
+oneline() {
+  case "$1" in *'
+'*) return 1 ;; esac
+  return 0
+}
+is_number() { # a non-negative decimal
+  oneline "$1" && printf '%s\n' "$1" | grep -Eq '^[0-9]{1,9}(\.[0-9]{1,6})?$'
+}
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# pick_times <duration> <max-frames> [<candidate time> ...]
+# The first and the last frame are always taken; the rest are the scene changes, spread evenly when there
+# are more of them than room. Without at least two usable scene changes the frames are evenly spaced.
+pick_times() {
+  pk_d="$1"; pk_n="$2"; shift 2
+  printf '%s\n' "$@" | awk -v D="$pk_d" -v N="$pk_n" '
+    BEGIN { m = 0 }
+    $1 ~ /^[0-9]+(\.[0-9]+)?$/ { c[++m] = $1 + 0 }
+    END {
+      last = D - 0.2; if (last < 0) last = 0
+      for (i = 2; i <= m; i++) { v = c[i]; j = i - 1; while (j >= 1 && c[j] > v) { c[j + 1] = c[j]; j-- } c[j + 1] = v }
+      k = 0; prev = 0
+      for (i = 1; i <= m; i++) if (c[i] > 0.3 && c[i] < last - 0.3 && c[i] - prev >= 0.4) { f[++k] = c[i]; prev = c[i] }
+      n = 0
+      if (last < 0.5) { t[++n] = 0 }
+      else if (k < 2) {
+        cnt = (N < 5) ? N : 5; if (cnt < 2) cnt = 2
+        for (i = 0; i < cnt; i++) t[++n] = last * i / (cnt - 1)
+      } else {
+        t[++n] = 0
+        slots = N - 2
+        if (k <= slots) { for (i = 1; i <= k; i++) t[++n] = f[i] }
+        else { for (i = 0; i < slots; i++) t[++n] = f[int((i + 0.5) * k / slots) + 1] }
+        t[++n] = last
+      }
+      for (i = 1; i <= n; i++) printf "%.3f\n", t[i]
+    }'
+}
+
+# run_limited <seconds> <command> ...: the command's own redirections apply; 143 means it was stopped
+run_limited() {
+  rl_secs="$1"; shift
+  "$@" &
+  rl_pid=$!
+  # the watchdog looks every second, so it never leaves a long `sleep` behind; after the limit it asks, then forces
+  (
+    i=0
+    while [ "$i" -lt "$rl_secs" ] && kill -0 "$rl_pid" 2>/dev/null; do sleep 1; i=$((i + 1)); done
+    if kill -0 "$rl_pid" 2>/dev/null; then
+      kill "$rl_pid" 2>/dev/null
+      sleep 2
+      kill -9 "$rl_pid" 2>/dev/null
+    fi
+  ) >/dev/null 2>&1 &
+  rl_wd=$!
+  wait "$rl_pid"
+  rl_rc=$?
+  kill "$rl_wd" 2>/dev/null
+  wait "$rl_wd" 2>/dev/null
+  return "$rl_rc"
+}
+
+cmd="${1:-}"
+[ -n "$cmd" ] || usage
+shift
+in=""; out=""; maxf=""; width=1280; rminput=0; duration=""; manifest=""; ffile=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --in) [ $# -ge 2 ] || usage; in="$2"; shift 2 ;;
+    --out) [ $# -ge 2 ] || usage; out="$2"; shift 2 ;;
+    --max-frames) [ $# -ge 2 ] || usage; maxf="$2"; shift 2 ;;
+    --width) [ $# -ge 2 ] || usage; width="$2"; shift 2 ;;
+    --duration) [ $# -ge 2 ] || usage; duration="$2"; shift 2 ;;
+    --manifest) [ $# -ge 2 ] || usage; manifest="$2"; shift 2 ;;
+    --file) [ $# -ge 2 ] || usage; ffile="$2"; shift 2 ;;
+    --remove-input) rminput=1; shift ;;
+    *) break ;;
+  esac
+done
+
+case "$cmd" in
+  check)
+    [ $# -eq 0 ] || usage
+    st=0
+    for t in ffmpeg ffprobe sips; do
+      if have "$t"; then echo "$t yes"; else echo "$t no"; [ "$t" = sips ] || st=1; fi
+    done
+    exit "$st"
+    ;;
+  pick)
+    is_number "$duration" || usage
+    printf '%s\n' "$maxf" | grep -Eq '^[0-9]{1,2}$' || usage
+    [ "$maxf" -ge 2 ] || usage
+    for a in "$@"; do is_number "$a" || usage; done
+    pick_times "$duration" "$maxf" "$@"
+    exit 0
+    ;;
+  hash)
+    [ $# -ge 1 ] || usage
+    for a in "$@"; do
+      printf '%s\n' "$a" | grep -Eq '^[0-9]{1,12}:[0-9]{1,12}:[0-9A-Za-z:.+T-]{1,40}$' || usage
+    done
+    if have shasum; then sum="$(printf '%s\n' "$@" | LC_ALL=C sort | shasum -a 256)"
+    elif have sha256sum; then sum="$(printf '%s\n' "$@" | LC_ALL=C sort | sha256sum)"
+    else fail 127 "shasum or sha256sum is needed"; fi
+    printf '%s\n' "$sum" | cut -c1-16
+    exit 0
+    ;;
+  manifest)
+    [ $# -eq 0 ] && [ -n "$ffile" ] || usage
+    rejectm() { echo "rejected $1"; exit 5; }
+    [ -f "$ffile" ] && [ ! -L "$ffile" ] || rejectm "the manifest is not a regular file"
+    mdir="$(sed -n 's/^[[:space:]]*"dir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ffile" | head -n 1)"
+    case "$mdir" in /*) ;; *) rejectm "the manifest has no absolute dir" ;; esac
+    case "/$mdir/" in */../*) rejectm "dir contains .." ;; esac
+    paths="$(grep -o '"path"[[:space:]]*:[[:space:]]*"[^"]*"' "$ffile" | sed 's/^"path"[[:space:]]*:[[:space:]]*"//; s/"$//')"
+    [ -n "$paths" ] || rejectm "the manifest lists no picture"
+    for mp in $paths; do
+      case "$mp" in "$mdir"/*) ;; *) rejectm "a picture path is outside the manifest folder" ;; esac
+      case "/$mp/" in */../*) rejectm "a picture path contains .." ;; esac
+      case "$mp" in *.jpg|*.jpeg|*.png|*.webp|*.gif) ;; *) rejectm "a picture path is not an image file" ;; esac
+      [ -f "$mp" ] && [ ! -L "$mp" ] || rejectm "a picture file is missing or is a link"
+    done
+    echo ok
+    exit 0
+    ;;
+  validate)
+    [ $# -eq 0 ] && [ -n "$manifest" ] && [ -n "$ffile" ] || usage
+    reject() { echo "rejected $1"; exit 5; }
+    [ -f "$manifest" ] || reject "the manifest does not exist"
+    [ -f "$ffile" ] && [ ! -L "$ffile" ] || reject "the findings file is not a regular file"
+    size="$(wc -c < "$ffile" | tr -d ' ')"
+    [ "$size" -gt 0 ] && [ "$size" -le 30000 ] || reject "the reply is empty or longer than 30000 bytes"
+    head -n 1 "$ffile" | grep -Eq '^# Media findings for [A-Z][A-Z0-9_]*-[0-9]+( .*)?$' || reject "the first line is not '# Media findings for <KEY>'"
+    grep -Fxq '## Instruction-like text' "$ffile" || reject "the heading '## Instruction-like text' is missing"
+    grep -Fxq '## Not viewed' "$ffile" || reject "the heading '## Not viewed' is missing"
+    for fid in $(sed -n 's/^## File \([0-9]\{1,12\}\)$/\1/p' "$ffile"); do
+      grep -Eq "\"id\" *: *\"?$fid\"?([^0-9]|\$)" "$manifest" || reject "file $fid is not in the manifest"
+    done
+    if grep -Eq -- '-----BEGIN [A-Z ]*PRIVATE KEY|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|xox[abp]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}|ATATT[A-Za-z0-9._=-]{20,}|aws_secret_access_key|aws_access_key_id' "$ffile"; then
+      reject "the reply contains a secret-like string"
+    fi
+    if [ -n "${HOME:-}" ] && [ "$HOME" != / ] && grep -Fq -- "$HOME" "$ffile"; then
+      reject "the reply contains a path of this user's home folder (cite frame names, not paths)"
+    fi
+    echo ok
+    exit 0
+    ;;
+  auto|image|video) [ $# -eq 0 ] || usage ;;
+  *) usage ;;
+esac
+
+# --- the file and the folders ---------------------------------------------------------------------
+[ -n "$in" ] && [ -n "$out" ] || usage
+for p in "$in" "$out"; do
+  oneline "$p" || fail 64 "a path must be one line"
+  case "$p" in /*) ;; *) fail 64 "paths must be absolute" ;; esac
+  case "/$p/" in */../*) fail 64 "paths must not contain .." ;; esac
+done
+[ -f "$in" ] && [ ! -L "$in" ] || fail 5 "the input is not a regular file"
+mime="$(file --mime-type -b "$in" 2>/dev/null)"
+base="$(basename "$in")"
+stem="${base%.*}"
+
+do_image() {
+  case "$mime" in
+    image/png|image/jpeg|image/webp) echo "view $in" ;;
+    image/gif)
+      # an animated GIF is a video
+      if have ffprobe; then
+        n="$(run_limited 30 ffprobe -v error -protocol_whitelist file -f gif -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 -i "file:$in" </dev/null 2>/dev/null | head -n 1)"
+        case "$n" in ''|*[!0-9]*) n=1 ;; esac
+        if [ "$n" -gt 1 ]; then echo video; return 0; fi
+      fi
+      echo "view $in"
+      ;;
+    image/heic|image/heif|image/tiff|image/bmp|image/x-ms-bmp)
+      mkdir -p "$out" || fail 5 "cannot create $out"
+      png="$out/$stem.png"
+      if have sips && sips -s format png "$in" --out "$png" >/dev/null 2>&1 && [ -s "$png" ]; then
+        echo "view $png"
+      elif have ffmpeg && ffmpeg -nostdin -hide_banner -loglevel error -y -protocol_whitelist file -i "file:$in" -frames:v 1 "$png" </dev/null >/dev/null 2>&1 && [ -s "$png" ]; then
+        echo "view $png"
+      else
+        fail 5 "cannot convert this $mime file to PNG (sips or ffmpeg is needed)"
+      fi
+      ;;
+    video/*) echo video ;;
+    *) fail 5 "the file type '$mime' is not an image or video this plugin reads" ;;
+  esac
+}
+
+if [ "$cmd" = image ]; then do_image; exit 0; fi
+
+if [ "$cmd" = auto ]; then
+  case "$mime" in
+    video/*) ;;
+    *)
+      r="$(do_image)" || exit $?
+      if [ "$r" = video ]; then :; else printf '%s\n' "$r"; exit 0; fi
+      ;;
+  esac
+fi
+
+# --- video ----------------------------------------------------------------------------------------
+# (--max-frames and --width matter only here: a still image needs neither, whatever is passed)
+case "$mime" in
+  video/*|image/gif) ;;
+  *) fail 5 "the file type '$mime' is not a video" ;;
+esac
+printf '%s\n' "$maxf" | grep -Eq '^[0-9]{1,2}$' && [ "$maxf" -ge 2 ] || usage
+printf '%s\n' "$width" | grep -Eq '^[0-9]{3,4}$' || usage
+have ffmpeg && have ffprobe || fail 127 "ffmpeg and ffprobe are needed for videos (macOS: brew install ffmpeg)"
+
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/media-prep.XXXXXX")" || fail 5 "no temporary folder"
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+probe="$(run_limited 60 ffprobe -v error -protocol_whitelist file -show_entries format=format_name,duration -of default=noprint_wrappers=1 -i "file:$in" </dev/null 2>/dev/null)"
+fmt_name="$(printf '%s\n' "$probe" | sed -n 's/^format_name=//p' | head -n 1)"
+case "${fmt_name%%,*}" in
+  mov) fmt=mov ;;
+  matroska) fmt=matroska ;;
+  avi) fmt=avi ;;
+  gif) fmt=gif ;;
+  *) fail 5 "the container '${fmt_name:-unknown}' is not one this plugin reads" ;;
+esac
+
+dur="$(printf '%s\n' "$probe" | sed -n 's/^duration=//p' | head -n 1)"
+if ! printf '%s\n' "$dur" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || [ "$(awk -v d="$dur" 'BEGIN { print (d > 0) ? 1 : 0 }')" != 1 ]; then
+  # no duration in the container (browser recordings): the last packet time is the duration
+  run_limited 120 ffprobe -v error -protocol_whitelist file -f "$fmt" -select_streams v:0 -show_entries packet=pts_time -of csv=p=0 -i "file:$in" </dev/null >"$tmp/packets.txt" 2>/dev/null
+  dur="$(awk '$1 ~ /^[0-9]+(\.[0-9]+)?$/ && $1 + 0 > m { m = $1 + 0 } END { print m + 0 }' "$tmp/packets.txt")"
+fi
+[ "$(awk -v d="$dur" 'BEGIN { print (d > 0) ? 1 : 0 }')" = 1 ] || fail 5 "cannot tell how long the video is"
+[ "$(awk -v d="$dur" -v m="$MAX_SECONDS" 'BEGIN { print (d <= m) ? 1 : 0 }')" = 1 ] || fail 5 "the video is longer than $MAX_SECONDS seconds"
+
+# scene changes, then the frame times
+run_limited 180 ffmpeg -nostdin -hide_banner -nostats -loglevel info -protocol_whitelist file -f "$fmt" -i "file:$in" -an -vf "select='gt(scene,$SCENE)',showinfo" -f null - </dev/null 2>"$tmp/scene.txt" >/dev/null
+cands="$(grep -o 'pts_time:[0-9.]*' "$tmp/scene.txt" 2>/dev/null | cut -d: -f2 | tr '\n' ' ')"
+# shellcheck disable=SC2086
+times="$(pick_times "$dur" "$maxf" $cands)"
+
+mkdir -p "$out" || fail 5 "cannot create $out"
+count=0
+list=""
+for t in $times; do
+  name="t$(awk -v t="$t" 'BEGIN { printf "%09.3f", t }').jpg"
+  f="$out/$name"
+  run_limited 60 ffmpeg -nostdin -hide_banner -loglevel error -y -protocol_whitelist file -ss "$t" -f "$fmt" -i "file:$in" -an -frames:v 1 -vf "scale='min($width,iw)':-2" -q:v 3 "$f" </dev/null >/dev/null 2>&1
+  if [ ! -s "$f" ]; then
+    # a frame past the last decodable one: step back
+    t2="$(awk -v t="$t" 'BEGIN { x = t - 0.5; if (x < 0) x = 0; printf "%.3f", x }')"
+    name="t$(awk -v t="$t2" 'BEGIN { printf "%09.3f", t }').jpg"
+    f="$out/$name"
+    run_limited 60 ffmpeg -nostdin -hide_banner -loglevel error -y -protocol_whitelist file -ss "$t2" -f "$fmt" -i "file:$in" -an -frames:v 1 -vf "scale='min($width,iw)':-2" -q:v 3 "$f" </dev/null >/dev/null 2>&1
+    t="$t2"
+  fi
+  if [ -s "$f" ]; then
+    count=$((count + 1))
+    list="$list
+frame $t $f"
+  else
+    rm -f "$f"
+  fi
+done
+[ "$count" -gt 0 ] || fail 5 "no frame could be read from the video"
+
+audio="no"
+a="$(run_limited 30 ffprobe -v error -protocol_whitelist file -f "$fmt" -select_streams a -show_entries stream=index -of csv=p=0 -i "file:$in" </dev/null 2>/dev/null)"
+[ -z "$a" ] || audio="yes"
+
+if [ "$rminput" = 1 ]; then
+  case "$in" in */raw/*) rm -f "$in" ;; esac
+fi
+
+printf '%s\n' "$list" | sed '/^$/d'
+echo "frames $count duration $dur audio $audio"

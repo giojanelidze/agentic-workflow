@@ -1,0 +1,222 @@
+#!/bin/sh
+# jira-attachment: keep an Atlassian API token in the OS keychain and download one Jira attachment with it.
+#
+# usage:
+#   jira-attachment login  --email <E>                       token on stdin (first line); stored only in the keychain
+#   jira-attachment logout --email <E>                       remove the token from the keychain
+#   jira-attachment check  --email <E> --site <host> [--cloud-id <uuid>]
+#   jira-attachment get    --email <E> --site <host> [--cloud-id <uuid>] --id <digits> --max-bytes <N> --out <dir>
+#
+# Why this exists: the Atlassian MCP servers have no tool that downloads attachment bytes. This is the one
+# place that talks to Jira outside the MCP server, so it is deliberately narrow:
+#   * the URL is built only from --site (must be <name>.atlassian.net) or --cloud-id (a UUID, gateway
+#     api.atlassian.com) and a numeric --id. It never accepts a URL and never uses the `content` link a ticket
+#     or an API response carries, so the token cannot be sent to a host somebody else chose;
+#   * the token comes from the keychain, goes to curl on its stdin (never argv, never the environment) and is
+#     never printed; curl follows redirects only to https and does not forward the credentials to another host;
+#   * the file is written as <id>.<ext> where ext comes from the file's content (a whitelist), never from the
+#     name Jira reports; anything else (an HTML login page, an archive) is refused.
+# Output (stdout, one line): `stored <E>`, `removed <E>`, `ok <accountId>` or `saved <path> <mime> <bytes>`.
+# Exit codes: 0 ok, 3 no token in the keychain, 4 the token was refused (401/403), 5 refused file (too big,
+# empty or a type outside the whitelist), 6 network or other HTTP error or the keychain write failed,
+# 64 bad usage, 69 no supported keychain on this OS, 127 curl is missing.
+# Plain POSIX sh; macOS (`security`) is verified, Linux (`secret-tool`) is not. No jq or python.
+
+service="agentic-workflow-atlassian"
+
+usage() {
+  echo "usage: jira-attachment login|logout --email <E> | check --email <E> --site <host> [--cloud-id <uuid>] | get --email <E> --site <host> [--cloud-id <uuid>] --id <digits> --max-bytes <N> --out <dir>" >&2
+  exit 64
+}
+fail() { # code message
+  printf 'jira-attachment: %s\n' "$2" >&2
+  exit "$1"
+}
+
+cmd="${1:-}"
+[ -n "$cmd" ] || usage
+shift
+email=""; site=""; cloud=""; id=""; maxb=""; out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --email) [ $# -ge 2 ] || usage; email="$2"; shift 2 ;;
+    --site) [ $# -ge 2 ] || usage; site="$2"; shift 2 ;;
+    --cloud-id) [ $# -ge 2 ] || usage; cloud="$2"; shift 2 ;;
+    --id) [ $# -ge 2 ] || usage; id="$2"; shift 2 ;;
+    --max-bytes) [ $# -ge 2 ] || usage; maxb="$2"; shift 2 ;;
+    --out) [ $# -ge 2 ] || usage; out="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+
+# --- validation (every value that reaches a URL, a path or a command line) -----------------------
+oneline() { # a value must be a single line, or a grep anchor could be fooled by an embedded newline
+  case "$1" in *'
+'*) return 1 ;; esac
+  return 0
+}
+matches() { # value extended-regex
+  oneline "$1" && printf '%s\n' "$1" | grep -Eq "$2"
+}
+
+[ -n "$email" ] || usage
+matches "$email" '^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$' || fail 64 "--email is not an email address"
+
+case "$cmd" in
+  check|get)
+    site="$(printf '%s' "$site" | tr 'A-Z' 'a-z')"
+    site="${site#https://}"
+    site="${site%/}"
+    matches "$site" '^[a-z0-9-]+\.atlassian\.net$' || fail 64 "--site must be <name>.atlassian.net"
+    if [ -n "$cloud" ]; then
+      matches "$cloud" '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' || fail 64 "--cloud-id must be a UUID"
+    fi
+    ;;
+esac
+if [ "$cmd" = get ]; then
+  matches "$id" '^[0-9]{1,12}$' || fail 64 "--id must be digits"
+  matches "$maxb" '^[1-9][0-9]{0,9}$' || fail 64 "--max-bytes must be a positive number"
+  [ -n "$out" ] || usage
+  oneline "$out" || fail 64 "--out must be one line"
+  case "$out" in /*) ;; *) fail 64 "--out must be an absolute path" ;; esac
+  case "/$out/" in */../*) fail 64 "--out must not contain .." ;; esac
+fi
+
+# --- the keychain ---------------------------------------------------------------------------------
+os="$(uname -s)"
+kc_read() { # prints the token, or nothing
+  case "$os" in
+    Darwin) security find-generic-password -s "$service" -a "$email" -w 2>/dev/null ;;
+    Linux) command -v secret-tool >/dev/null 2>&1 && secret-tool lookup service "$service" account "$email" 2>/dev/null ;;
+  esac
+}
+kc_supported() {
+  case "$os" in
+    Darwin) command -v security >/dev/null 2>&1 ;;
+    Linux) command -v secret-tool >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+case "$cmd" in
+  login)
+    kc_supported || fail 69 "no supported keychain on this system (macOS 'security' or Linux 'secret-tool' is needed)"
+    if [ -t 0 ]; then
+      printf 'Paste the Atlassian API token and press Enter (input is hidden): ' >&2
+      trap 'stty echo 2>/dev/null' EXIT
+      trap 'exit 129' HUP
+      trap 'exit 130' INT
+      trap 'exit 143' TERM
+      stty -echo 2>/dev/null
+      IFS= read -r token
+      stty echo 2>/dev/null
+      printf '\n' >&2
+    else
+      IFS= read -r token
+    fi
+    token="$(printf '%s' "$token" | tr -d '\r')"
+    # (a length check in the shell: some grep implementations refuse a {20,2048} repetition)
+    matches "$token" '^[A-Za-z0-9._=+/-]+$' && [ "${#token}" -ge 20 ] && [ "${#token}" -le 2048 ] || fail 64 "the input does not look like an API token (nothing was stored)"
+    case "$token" in
+      ATATT*) ;;
+      *) echo "jira-attachment: warning: the token does not start with ATATT, as Atlassian API tokens do" >&2 ;;
+    esac
+    case "$os" in
+      # `security -i` reads commands from stdin, so the token never appears in a process's argument list.
+      Darwin) printf 'add-generic-password -U -s %s -a %s -w %s\n' "$service" "$email" "$token" | security -i >/dev/null 2>&1 ;;
+      Linux) printf '%s' "$token" | secret-tool store --label="agentic-workflow Atlassian API token" service "$service" account "$email" >/dev/null 2>&1 ;;
+    esac
+    [ "$(kc_read)" = "$token" ] || fail 6 "the token could not be stored in the keychain"
+    token=""
+    echo "stored $email"
+    exit 0
+    ;;
+  logout)
+    kc_supported || fail 69 "no supported keychain on this system"
+    case "$os" in
+      Darwin) security delete-generic-password -s "$service" -a "$email" >/dev/null 2>&1 ;;
+      Linux) secret-tool clear service "$service" account "$email" >/dev/null 2>&1 ;;
+    esac
+    echo "removed $email"
+    exit 0
+    ;;
+  check|get) ;;
+  *) usage ;;
+esac
+
+# --- check and get --------------------------------------------------------------------------------
+command -v curl >/dev/null 2>&1 || fail 127 "curl is not installed"
+kc_supported || fail 69 "no supported keychain on this system"
+token="$(kc_read)"
+[ -n "$token" ] || fail 3 "no Atlassian API token for $email in the keychain: run 'jira-attachment login --email $email'"
+# whatever the keychain returns goes into a curl config line: it must have the shape of a token
+matches "$token" '^[A-Za-z0-9._=+/-]+$' || fail 3 "the stored value for $email is not an Atlassian API token: run 'jira-attachment login --email $email' again"
+
+if [ -n "$cloud" ]; then
+  base="https://api.atlassian.com/ex/jira/$cloud"
+else
+  base="https://$site"
+fi
+
+body="$(mktemp "${TMPDIR:-/tmp}/jira-attachment.XXXXXX")" || fail 6 "no temporary file"
+part=""
+cleanup() { rm -f "$body"; [ -z "$part" ] || rm -f "$part"; }
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+fetch() { # url dest max-bytes: sets http_code and curl_rc; the token goes to curl on stdin
+  http_code="$(printf 'user = "%s:%s"\n' "$email" "$token" | curl -q -sS -K - -L --max-redirs 5 --proto '=https' --proto-redir '=https' --max-filesize "$3" --max-time 300 -o "$2" -w '%{http_code}' "$1" 2>/dev/null)"
+  curl_rc=$?
+}
+http_fail() {
+  case "$http_code" in
+    401|403) fail 4 "Atlassian refused the token (HTTP $http_code): create a new API token and run setup again" ;;
+    404) fail 6 "not found (HTTP 404)" ;;
+    *) fail 6 "request failed (curl $curl_rc, HTTP $http_code)" ;;
+  esac
+}
+
+if [ "$cmd" = check ]; then
+  fetch "$base/rest/api/3/myself" "$body" 1048576
+  [ "$curl_rc" = 0 ] && [ "$http_code" = 200 ] || http_fail
+  account="$(sed -n 's/.*"accountId" *: *"\([^"]*\)".*/\1/p' "$body" | head -n 1)"
+  [ -n "$account" ] || fail 6 "the answer has no accountId"
+  echo "ok $account"
+  exit 0
+fi
+
+mkdir -p "$out" || fail 6 "cannot create $out"
+part="$out/$id.part"
+rm -f "$part"
+fetch "$base/rest/api/3/attachment/content/$id" "$part" "$maxb"
+if [ "$curl_rc" = 63 ]; then fail 5 "the file is larger than $maxb bytes"; fi
+[ "$curl_rc" = 0 ] && [ "$http_code" = 200 ] || http_fail
+
+bytes="$(wc -c < "$part" | tr -d ' ')"
+[ "$bytes" -gt 0 ] || fail 5 "the file is empty"
+[ "$bytes" -le "$maxb" ] || fail 5 "the file is larger than $maxb bytes"
+
+mime="$(file --mime-type -b "$part" 2>/dev/null)"
+case "$mime" in
+  image/png) ext=png ;;
+  image/jpeg) ext=jpg ;;
+  image/gif) ext=gif ;;
+  image/webp) ext=webp ;;
+  image/heic) ext=heic ;;
+  image/heif) ext=heif ;;
+  image/bmp|image/x-ms-bmp) ext=bmp ;;
+  image/tiff) ext=tiff ;;
+  video/mp4) ext=mp4 ;;
+  video/quicktime) ext=mov ;;
+  video/webm) ext=webm ;;
+  video/x-matroska) ext=mkv ;;
+  video/x-msvideo) ext=avi ;;
+  *) fail 5 "the file type '$mime' is not an image or video this plugin reads" ;;
+esac
+
+final="$out/$id.$ext"
+mv -f "$part" "$final" || fail 6 "cannot write $final"
+part=""
+echo "saved $final $mime $bytes"

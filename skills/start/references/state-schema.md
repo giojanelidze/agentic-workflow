@@ -25,6 +25,8 @@ Which config applies (`mode`) is derived from which files exist: the repository 
 | `local.json` (in `repos/…`, not in `State`) | `/agentic-workflow:setup` | personal Jira and GitHub settings (connector prefix, target user, gh account) and the accepted ceiling (`acceptedWriteMode`, `acceptedOrigins`) |
 | `config.json` (in `repos/…`, personal mode) | `/agentic-workflow:setup` | the repository config |
 | `<KEY>/brief.md` | `jira-analyst` | handoff to the planner |
+| `<KEY>/media/<hash>/raw/`, `view/`, `manifest.json` | `jira-analyst` (through `jira-attachment` and `media-prep`) | the ticket's downloaded attachments, the frames made from them, and the list the viewer reads. `<hash>` identifies the set of attachments (`media-prep hash`), so a changed attachment gives a new folder. A cache of downloads: written also in `--dry-run`, never holds ticket text, and `raw/` keeps only still images (a video is deleted once its frames exist) |
+| `<KEY>/media/<hash>/findings-<n>.md` | orchestrator (the `/agentic-workflow:start` and `/agentic-workflow:media` skills) | the verbatim reply of the `media-analyst`, after `media-prep validate`, or the one line `REJECTED: <reason>`. Never overwritten (`--refresh` writes the next number), because a `brief.md` may cite it. Neither the planner nor the implementer opens these files or the frames |
 | `<KEY>/state.json` | orchestrator | pipeline progress |
 | `<KEY>/plan.md`, `<KEY>/tasks/<n>-<slug>.md` | `implementation-planner` | plan index and one detailed spec per task (the orchestrator may only delete the specs of tasks that are not done, before a re-plan) |
 | `<KEY>/baseline-report.md`, `test-report.md` | `test-runner` | check results |
