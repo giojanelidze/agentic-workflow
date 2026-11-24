@@ -1,0 +1,61 @@
+#!/bin/sh
+# wait-gh-login: wait until a gh login appears (the authorization event of `gh auth login`).
+#
+# usage: wait-gh-login --host <host> [--login <login>] [--max-seconds N]
+#   --login   wait until exactly this account is listed for the host with state "success"
+#   without --login, wait until the set of (login, state) pairs differs from the one at start
+#             (watching pairs and not just logins, so that logging an expired account in again counts)
+#   --max-seconds   give up after this long (default 600)
+#
+# exit codes: 0 event seen, 1 timeout, 127 gh is not installed, 64 bad usage.
+# It prints one line on stdout: "login <login>:<state>" for each new or matching pair, or "timeout".
+# Plain POSIX sh. It never reads a token and never changes gh's active account or config.
+
+usage() {
+  echo "usage: wait-gh-login --host <host> [--login <login>] [--max-seconds N]" >&2
+  exit 64
+}
+
+host=""
+login=""
+max=600
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --host) [ $# -ge 2 ] || usage; host="$2"; shift 2 ;;
+    --login) [ $# -ge 2 ] || usage; login="$2"; shift 2 ;;
+    --max-seconds) [ $# -ge 2 ] || usage; max="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+[ -n "$host" ] || usage
+case "$max" in ''|*[!0-9]*) usage ;; esac
+
+if ! command -v gh >/dev/null 2>&1; then
+  echo "wait-gh-login: the gh CLI is not installed or not on PATH" >&2
+  exit 127
+fi
+
+# One "login:state" line per account on the host, sorted. No tokens are involved.
+pairs() {
+  gh auth status --hostname "$host" --json hosts --jq '.hosts[][] | "\(.login):\(.state)"' 2>/dev/null | sort
+}
+
+baseline="$(pairs)"
+start="$(date +%s)"
+while :; do
+  current="$(pairs)"
+  if [ -n "$login" ]; then
+    if printf '%s\n' "$current" | grep -qx "$login:success"; then
+      echo "login $login:success"
+      exit 0
+    fi
+  elif [ "$current" != "$baseline" ]; then
+    printf '%s\n' "$current" | while IFS= read -r line; do
+      printf '%s\n' "$baseline" | grep -qxF "$line" || echo "login $line"
+    done
+    exit 0
+  fi
+  now="$(date +%s)"
+  if [ $((now - start)) -ge "$max" ]; then echo timeout; exit 1; fi
+  sleep 3
+done

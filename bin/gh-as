@@ -1,0 +1,48 @@
+#!/bin/sh
+# gh-as: run the GitHub CLI as one specific logged-in account, for this single process only.
+#
+# usage: gh-as --account <login> --host <host> <gh arguments...>
+#
+# The token of <login> is read with `gh auth token --user` and handed to gh through an
+# environment variable of this process alone. gh's own active account and config are never
+# changed, so other terminals are not affected. The token is never printed or stored.
+# Plain POSIX sh; no jq or python needed.
+
+account=""
+host=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --account) [ $# -ge 2 ] || { echo "gh-as: --account needs a value" >&2; exit 2; }; account="$2"; shift 2 ;;
+    --host)    [ $# -ge 2 ] || { echo "gh-as: --host needs a value" >&2; exit 2; };    host="$2";    shift 2 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+
+if [ -z "$account" ] || [ -z "$host" ] || [ $# -eq 0 ]; then
+  echo "usage: gh-as --account <login> --host <host> <gh arguments...>" >&2
+  exit 2
+fi
+
+if ! command -v gh >/dev/null 2>&1; then
+  echo "gh-as: the gh CLI is not installed or not on PATH" >&2
+  exit 127
+fi
+
+token="$(gh auth token --hostname "$host" --user "$account" 2>/dev/null)" || token=""
+if [ -z "$token" ]; then
+  echo "gh-as: no usable login for account '$account' on $host. Run: gh auth login --hostname $host" >&2
+  exit 3
+fi
+
+# github.com and *.ghe.com read GH_TOKEN; any other (self-hosted) host reads GH_ENTERPRISE_TOKEN.
+case "$host" in
+  github.com|*.ghe.com) GH_TOKEN="$token"; export GH_TOKEN ;;
+  *)                    GH_ENTERPRISE_TOKEN="$token"; export GH_ENTERPRISE_TOKEN ;;
+esac
+GH_HOST="$host"; export GH_HOST
+GH_PROMPT_DISABLED=1; export GH_PROMPT_DISABLED
+unset token
+
+exec gh "$@"

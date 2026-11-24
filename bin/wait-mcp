@@ -1,0 +1,76 @@
+#!/bin/sh
+# wait-mcp: wait until an MCP server reports "Connected" (the authorization event), or check it once.
+#
+# usage: wait-mcp <server> [--check] [--max-seconds N]
+#   <server>        the name `claude mcp list` prints, for example plugin:agentic-workflow:atlassian
+#                   or "claude.ai Atlassian Rovo"
+#   --check         look once and exit; without it the script polls until the server is connected
+#   --max-seconds   give up after this long (default 600)
+#
+# exit codes: 0 connected, 1 not connected (--check) or still not connected at the timeout,
+#             2 the name is unknown to Claude Code, 127 the claude CLI is not installed, 64 bad usage.
+# It prints one word on stdout: connected, not-connected, timeout or unknown.
+# Plain POSIX sh. It reads no token and changes nothing: it only runs `claude mcp get`.
+
+usage() {
+  echo "usage: wait-mcp <server> [--check] [--max-seconds N]" >&2
+  exit 64
+}
+
+server=""
+check=0
+max=600
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check) check=1; shift ;;
+    --max-seconds) [ $# -ge 2 ] || usage; max="$2"; shift 2 ;;
+    -*) usage ;;
+    *) [ -z "$server" ] || usage; server="$1"; shift ;;
+  esac
+done
+[ -n "$server" ] || usage
+case "$max" in ''|*[!0-9]*) usage ;; esac
+
+if ! command -v claude >/dev/null 2>&1; then
+  echo "wait-mcp: the claude CLI is not installed or not on PATH" >&2
+  exit 127
+fi
+
+# The plugin's own root, so that a plugin loaded with --plugin-dir is known to the CLI too.
+root="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+
+status() {
+  out="$(claude --plugin-dir "$root" mcp get "$server" 2>&1)"
+  case "$out" in
+    *"No MCP server named"*) out="$(claude mcp get "$server" 2>&1)" ;; # an installed plugin needs no flag
+  esac
+  case "$out" in
+    *"No MCP server named"*) return 2 ;;
+  esac
+  if printf '%s\n' "$out" | grep -q '^ *Status: .*Connected'; then
+    return 0
+  fi
+  return 1
+}
+
+if [ "$check" -eq 1 ]; then
+  status
+  rc=$?
+  case "$rc" in
+    0) echo connected ;;
+    2) echo unknown ;;
+    *) echo not-connected ;;
+  esac
+  exit "$rc"
+fi
+
+start="$(date +%s)"
+while :; do
+  status
+  rc=$?
+  if [ "$rc" -eq 0 ]; then echo connected; exit 0; fi
+  if [ "$rc" -eq 2 ]; then echo unknown; exit 2; fi
+  now="$(date +%s)"
+  if [ $((now - start)) -ge "$max" ]; then echo timeout; exit 1; fi
+  sleep 3
+done

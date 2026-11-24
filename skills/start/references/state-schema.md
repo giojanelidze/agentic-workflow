@@ -5,7 +5,7 @@ Everything lives in `.agentic-workflow/` of the target repo (excluded from git).
 | File | Writer | Holds |
 |---|---|---|
 | `ledger.json`, `lock.json`, `last_run.json`, `pending/` | `jira-analyst` | triage state of tickets, run lease, last run report, questions awaiting answers |
-| `local.json` | `/agentic-workflow:setup` | personal Jira settings |
+| `local.json` | `/agentic-workflow:setup` | personal Jira and GitHub settings (connector prefix, target user, gh account) |
 | `<KEY>/brief.md` | `jira-analyst` | handoff to the planner |
 | `<KEY>/state.json` | orchestrator | pipeline progress |
 | `<KEY>/plan.md`, `<KEY>/tasks/<n>-<slug>.md` | `implementation-planner` | plan index and one detailed spec per task (the orchestrator may only delete the specs of tasks that are not done, before a re-plan) |
@@ -51,6 +51,7 @@ States: `DISCOVERED, ANALYZING, READY, NEEDS_INFO, ANSWERED, REJECTED, HANDED_OF
   "stage": "implement",
   "auto": false,
   "base": "main", "branch": "feat/ABC-123-add-export", "baseSha": "abc1234",
+  "github": { "host": "github.com", "repo": "octocat/hello", "account": "octocat" },
   "tasks": [{ "n": 1, "title": "…", "spec": "tasks/1-add-export.md", "status": "pending | in_progress | done | blocked" }],
   "planAnswers": [{ "id": "P1", "tag": "Tech", "question": "…", "answer": "…", "source": "operator | operator-delegated" }],
   "counters": { "testLoop": 0, "implementerRuns": 0, "needsInputTickets": 0, "planRounds": 0, "planEdits": 0 },
@@ -65,6 +66,8 @@ States: `DISCOVERED, ANALYZING, READY, NEEDS_INFO, ANSWERED, REJECTED, HANDED_OF
 ```
 
 `stage`: `analysis, branch, plan, baseline, implement, review, publish, jira, done`.
+
+`github` is the GitHub binding found by the preflight of the current run (rewritten every time the file is created or loaded, also on a resume): `host` and `account` from `.agentic-workflow/local.json`, `repo` (`<owner>/<repo>`) read from `origin`. The orchestrator passes it to `pr-publisher`; it is absent (`null`) when there is no binding or no `gh`, and the publish stage then only pushes and writes `pr.md`.
 
 Planning fields: `planAnswers` holds every question answered in this run (`P<n>` from the planner, `E<n>` for operator edits at checkpoint 1); all of them are passed to each planner run so a question is never asked twice. `planRounds` counts planner re-runs caused by a reopen, a technical question or a spec mismatch (max 3); `planEdits` counts re-runs caused by an edit at checkpoint 1 (max 2). `lastPlanQuestions` keeps the signatures (tag + normalized text) of the previous run's required questions: the same signature twice ends the loop.
 
