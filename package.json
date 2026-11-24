@@ -4,7 +4,7 @@
   "private": true,
   "description": "An autonomous, agent-powered workflow that covers the entire development lifecycle, from analyzing Jira tasks to implementing solutions, running tests, reviewing code, and creating pull requests, with minimal human intervention.",
   "scripts": {
-    "test": "claude plugin validate . --strict"
+    "test": "claude plugin validate . --strict && sh tests/shell/run.sh"
   },
   "author": "Giorgi Janelidze",
   "license": "ISC"

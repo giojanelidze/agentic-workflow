@@ -37,7 +37,7 @@ prepare round n:  diff.patch, changed-files.txt (+ delta.patch from round 2)
 Only after the deterministic checks are green on the code that will be reviewed: the last `test-runner` check returned `Status: PASS` and `state.json.lastCheckSha` equals `git rev-parse HEAD`, and the working tree is clean. Why: reviewing code that does not build or whose tests fail produces noise, and the reviewers would report what the checks already say. If `lastCheckSha` differs from HEAD (for example after `--from review`), run `test-runner` in `check` mode first; on new failures follow the test loop of the orchestrator, not this stage.
 
 ## 2. Prepare the round (orchestrator, round `n`)
-Create `.agentic-workflow/<KEY>/review/round-<n>/` and write, with Bash (`LOCKS` stands for the three pathspecs `':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/pnpm-lock.yaml' ':(exclude,glob)**/yarn.lock'`):
+Create `<State>/<KEY>/review/round-<n>/` and write, with Bash, to these absolute paths (`LOCKS` stands for the three pathspecs `':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/pnpm-lock.yaml' ':(exclude,glob)**/yarn.lock'`):
 - `diff.patch`: `git diff -U10 origin/<base>...HEAD -- . $LOCKS`. Lockfiles are left out because they bury the real change; a dependency change still shows in `package.json` and `changed-files.txt`.
 - `changed-files.txt`: `git diff --name-status origin/<base>...HEAD`.
 - Round 2 and up, `delta.patch`: `git diff -U10 <sha of round n-1>..HEAD -- . $LOCKS`. It is what the reviewers look at when they re-review.
@@ -49,9 +49,10 @@ In **one message** start `agentic-workflow:correctness-reviewer`, `conventions-r
 
 ```
 Review <KEY>, round <n>.
+State: <absolute State path>
 Reviewed commit: <sha>. Base: origin/<base>.
-Files: .agentic-workflow/<KEY>/review/round-<n>/ (diff.patch, changed-files.txt[, delta.patch]).
-[Round 2 and up] Previous blockers: .agentic-workflow/<KEY>/review/round-<n-1>/summary.md
+Files: <State>/<KEY>/review/round-<n>/ (diff.patch, changed-files.txt[, delta.patch]).
+[Round 2 and up] Previous blockers: <State>/<KEY>/review/round-<n-1>/summary.md
 ```
 
 Each reviewer starts with a fresh context and receives only the task description (`brief.md`, `plan.md`, the task specs), the change and read access to the repository. It never gets the implementer's reasoning or `implementation.md`, so that it judges the result independently and does not inherit the implementer's blind spots. It cannot modify anything: its tools are Read, Grep and Glob. This is the one place in `start` where agents run in parallel; wait for all four before going on.
@@ -65,7 +66,7 @@ Because reviewers cannot write files, the orchestrator saves each reply **verbat
 A malformed reply is re-run once (that reviewer only). A second failure, or a `BLOCKED: <reason>` reply, ends the stage: write `blocked.md` and stop.
 
 ## 4. Aggregate
-Run `agentic-workflow:review-aggregator` with `<KEY>` and `<n>`. It reads the four reports (and, from round 2, the previous summary) and writes `review/round-<n>/summary.md`:
+Run `agentic-workflow:review-aggregator` with `<KEY>`, `<n>` and the `State:` line. It reads the four reports (and, from round 2, the previous summary) and writes `review/round-<n>/summary.md`:
 - duplicates are merged: the same file, overlapping lines and the same fix; the higher severity wins and every reporter is listed;
 - every previous blocker that a reviewer still reports `unresolved` (or did not mention) stays a blocker of this round, listed once;
 - `Verdict` is `changes_required` if at least one blocker exists, otherwise `approve`;
@@ -87,7 +88,7 @@ The limit is 3 rounds in all: the review runs in rounds 1, 2 and 3, and the impl
 They are never auto-fixed. Checkpoint 2 shows how many there are. `pr-publisher` collects the `## Suggestions` and `## Nits` of **every** round's `summary.md` (a suggestion raised in round 1 does not come back in round 2, because the reviewers only look at new changes then), removes duplicates by file and summary, and posts them as one PR comment marked `<!-- agentic-workflow:review -->`. On a re-run it edits that comment instead of adding another. Line numbers in the comment are those of the commit that was reviewed in the round that raised them.
 
 ## 7. Files
-All under `.agentic-workflow/<KEY>/review/round-<n>/`, which is excluded from git.
+All under `<State>/<KEY>/review/round-<n>/`, which is outside the repository.
 
 | File | Writer |
 |---|---|

@@ -1,11 +1,29 @@
 # State and ownership
 
-Everything lives in `.agentic-workflow/` of the target repo (excluded from git). Each file has exactly one writer.
+Everything the pipeline produces lives in the run folder `State`, **outside the repository**, in the user's own `~/.claude/agentic-workflow/`. Nothing is written into the working tree except the team config that the user chose to share. Each file has exactly one writer.
 
-| File | Writer | Holds |
+## Where things live
+
+`bin/aw-paths` is the only place that computes these paths. The folder is keyed by `origin` (host, owner and repository, lower-cased), so every clone and worktree of the same repository shares it.
+
+```
+~/.claude/agentic-workflow/
+  repos/<host>/<owner>/<repo>/
+    local.json    personal values (always); also the ceiling of what the user accepted in setup
+    config.json   the repository config, only when the user chose "only on this computer" (personal mode)
+  state/<host>/<owner>/<repo>/   the run folder, called State below
+<repo>/.claude/agentic-workflow.json   the repository config, only when the user chose to share it with the team (team mode)
+```
+
+The run files have a tree of their own on purpose: the one permission rule that lets agents write them, `Edit(~/.claude/agentic-workflow/state/**)`, can then never match `local.json` or `config.json`, whatever a repository or an owner is called (a layout like `repos/<host>/<owner>/<repo>/state/` would be matched by `repos/**/state/**` for a repository named `state`).
+
+Which config applies (`mode`) is derived from which files exist: the repository file means `team`, `config.json` means `personal`, both is a `conflict` that setup resolves, neither is `none`. Two clones of one repository share `State`; `lock.json` allows one run at a time per repository, and a ticket whose `state.json` names a branch missing in this clone is resumed only after the user confirms.
+
+| File (under `State` unless noted) | Writer | Holds |
 |---|---|---|
-| `ledger.json`, `lock.json`, `last_run.json`, `pending/` | `jira-analyst` | triage state of tickets, run lease, last run report, questions awaiting answers |
-| `local.json` | `/agentic-workflow:setup` | personal Jira and GitHub settings (connector prefix, target user, gh account) |
+| `ledger.json`, `lock.json`, `last_run.json`, `pending/` | `jira-analyst` | triage state of tickets, run lease, last run report, questions awaiting answers (the user may edit a file in `pending/` and mark it `operator_status: answered`) |
+| `local.json` (in `repos/…`, not in `State`) | `/agentic-workflow:setup` | personal Jira and GitHub settings (connector prefix, target user, gh account) and the accepted ceiling (`acceptedWriteMode`, `acceptedOrigins`) |
+| `config.json` (in `repos/…`, personal mode) | `/agentic-workflow:setup` | the repository config |
 | `<KEY>/brief.md` | `jira-analyst` | handoff to the planner |
 | `<KEY>/state.json` | orchestrator | pipeline progress |
 | `<KEY>/plan.md`, `<KEY>/tasks/<n>-<slug>.md` | `implementation-planner` | plan index and one detailed spec per task (the orchestrator may only delete the specs of tasks that are not done, before a re-plan) |
@@ -17,9 +35,13 @@ Everything lives in `.agentic-workflow/` of the target repo (excluded from git).
 | `<KEY>/pr.md` | `pr-publisher` | PR URL, body, CI |
 | `<KEY>/blocked.md` | orchestrator | why a run stopped |
 
+Permission rules: `Edit(~/.claude/agentic-workflow/state/**)` lets the agents write the run files without a prompt. `local.json` and `config.json` are deliberately **not** covered: the plugin's guard hook trusts them, so only setup, in the main conversation and with the normal permission prompt, may change them.
+
 Not a handoff: `implementer` also keeps repository knowledge (structure, architecture, standards) in its own memory directory under `~/.claude/agent-memory/`, outside the target repo. It holds no ticket data, and no other agent reads it.
 
 No field is stored in two places: Jira-side facts (comments, labels, attempts) are in the ledger only; pipeline facts (branch, tasks, counters, PR URL) in `state.json` only.
+
+Older versions kept all of this in `<repo>/.agentic-workflow/`. `/agentic-workflow:setup` offers to move it (see `skills/setup/SKILL.md`); until then `start` stops and asks for setup.
 
 ## ledger.json (analyst)
 
@@ -67,7 +89,7 @@ States: `DISCOVERED, ANALYZING, READY, NEEDS_INFO, ANSWERED, REJECTED, HANDED_OF
 
 `stage`: `analysis, branch, plan, baseline, implement, review, publish, jira, done`.
 
-`github` is the GitHub binding found by the preflight of the current run (rewritten every time the file is created or loaded, also on a resume): `host` and `account` from `.agentic-workflow/local.json`, `repo` (`<owner>/<repo>`) read from `origin`. The orchestrator passes it to `pr-publisher`; it is absent (`null`) when there is no binding or no `gh`, and the publish stage then only pushes and writes `pr.md`.
+`github` is the GitHub binding found by the preflight of the current run (rewritten every time the file is created or loaded, also on a resume): `host` and `account` from `Local`, `repo` (`<owner>/<repo>`) read from `origin`. The orchestrator passes it to `pr-publisher`; it is absent (`null`) when there is no binding or no `gh`, and the publish stage then only pushes and writes `pr.md`.
 
 Planning fields: `planAnswers` holds every question answered in this run (`P<n>` from the planner, `E<n>` for operator edits at checkpoint 1); all of them are passed to each planner run so a question is never asked twice. `planRounds` counts planner re-runs caused by a reopen, a technical question or a spec mismatch (max 3); `planEdits` counts re-runs caused by an edit at checkpoint 1 (max 2). `lastPlanQuestions` keeps the signatures (tag + normalized text) of the previous run's required questions: the same signature twice ends the loop.
 

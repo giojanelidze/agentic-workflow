@@ -21,7 +21,7 @@ Jira board (your assigned tickets)
   -> jira-analyst            PR comment + transition, within your writeMode
 ```
 
-The `start` skill runs in the main conversation and orchestrates the agents. Agents hand work to each other through files in `.agentic-workflow/` in the repository you work on (excluded from git automatically). Only the main thread talks to you, and only `jira-analyst` touches Jira and Confluence.
+The `start` skill runs in the main conversation and orchestrates the agents. Agents hand work to each other through files in a run folder under `~/.claude/agentic-workflow/` (keyed by the repository's `origin`), outside your repository. Only the main thread talks to you, and only `jira-analyst` touches Jira and Confluence.
 
 ## Prerequisites
 
@@ -48,10 +48,21 @@ Local development: `claude --plugin-dir .`
 ## First run
 
 1. Run `/agentic-workflow:setup` in the repository you work on. It finds your Atlassian server (asking you to pick one if several are connected; only the three prefixes the analyst can call are offered). If Jira is not authorized yet, it shows you a link: open it, sign in with the Atlassian account that has your project and click Accept; the token is stored and refreshed for you.
-2. Setup goes in three stages and saves each one when it is finished. **Stage 1, Jira:** the connector (with the account and sites each one reaches), project, board, target user, statuses, issue types, Confluence spaces and `writeMode`. **Stage 2, GitHub and repo:** it reads the host and repository from `origin` (an SSH alias is resolved), lists your logged-in gh accounts, checks which can write to the repository, proposes the one your SSH key pushes as, and asks for the base branch. **Stage 3, behavior:** investigation, language and candidate count. It writes `.claude/agentic-workflow.json` and `.agentic-workflow/local.json` (your personal values: the server's tool prefix and the gh account) and registers exact allow/deny permission rules (in your user settings or this repo's `.claude/settings.local.json`, your choice, asked once), so later runs do not stop to ask. When an authorization is needed (Jira, or a gh login) setup waits for it by itself and continues as soon as it is done.
+2. Setup goes in three stages and saves each one when it is finished. **Stage 1, Jira:** the connector (with the account and sites each one reaches), project, board, target user, statuses, issue types, Confluence spaces and `writeMode`. **Stage 2, GitHub and repo:** it reads the host and repository from `origin` (an SSH alias is resolved), lists your logged-in gh accounts, checks which can write to the repository, proposes the one your SSH key pushes as, and asks for the base branch. **Stage 3, behavior:** investigation, language and candidate count. Stage 1 starts by asking where the configuration lives (see Storage below). Setup writes the configuration and your personal values (the server's tool prefix, the gh account and the limits you accepted) and registers exact `allow` permission rules in your user settings (`~/.claude/settings.json`), so later runs do not stop to ask. Claude Code asks you to approve the writes to the configuration files: that is intended, see Storage. When an authorization is needed (Jira, or a gh login) setup waits for it by itself and continues as soon as it is done.
 3. Run `/agentic-workflow:start`.
 
-Setup is done once per repository. It detects what it can (connectors, sites, projects, your gh accounts, the repository's host and default branch) and then asks a few grouped questions in which the detected value is always the first, recommended choice, so confirming is enough. Running it again on a configured repository shows the current values and asks what to change; `/agentic-workflow:setup --reconfigure jira|github|behavior|permissions` goes straight to one part. Every `start` re-checks that the Jira connector can reach the configured site and that the bound gh account can write to the repository, and stops with the exact fix when it cannot.
+Setup is done once per repository. It detects what it can (connectors, sites, projects, your gh accounts, the repository's host and default branch) and then asks a few grouped questions in which the detected value is always the first, recommended choice, so confirming is enough. Running it again on a configured repository shows the current values and asks what to change; `/agentic-workflow:setup --reconfigure jira|github|behavior|storage|permissions` goes straight to one part. Every `start` re-checks that the Jira connector can reach the configured site and that the bound gh account can write to the repository, and stops with the exact fix when it cannot.
+
+## Storage
+
+You choose once, in Stage 1, where the repository's configuration lives:
+
+- **Only on this computer.** Nothing is written into the repository. The configuration and your personal values live in `~/.claude/agentic-workflow/repos/<host>/<owner>/<repo>/` and the run files in `~/.claude/agentic-workflow/state/<host>/<owner>/<repo>/`, both keyed by the repository's `origin` (so another clone of the same repository finds them). Use this when the workflow is adapted to you alone.
+- **In the repository, shared with the team.** Setup creates `.claude/agentic-workflow.json` (project, board, base branch, write mode, investigation) and you decide whether to commit it. Your personal values and the run files still stay on your computer. A teammate's later change to the file can never widen what the plugin may do for you: the write mode and the browser origins you accepted in your own setup are a ceiling, the lower value applies, and `start` tells you in one line when the shared file asks for more. You can also accept less than the team file allows. Setup does not rewrite keys that already exist in a shared file.
+
+Either way the run files (briefs, plans, reports, the ticket ledger) are outside the repository, so there is no `.git/info/exclude` entry and nothing to commit by accident. Pending questions you can answer by hand are in `<run folder>/pending/` (the path is printed when a ticket is parked). `/agentic-workflow:setup --reconfigure storage` moves the configuration from one place to the other. Repositories set up by an older version (config in the repository, files in `.agentic-workflow/`) are migrated by running setup again: it offers to move the run files and to remove permission rules that older versions wrote.
+
+Setup is the only writer of the configuration and of your personal values, and Claude Code asks you to approve each write. That prompt is the safeguard: the plugin's guard trusts these files, so no permission rule covers them, and an agent that tries to change them triggers the same prompt. It protects as long as prompts are on: a mode that skips them (such as `bypassPermissions`) or a broad shell allow rule would remove it, as it does for any file.
 
 ## Use
 
@@ -66,13 +77,13 @@ Setup is done once per repository. It detects what it can (connectors, sites, pr
 
 - By default the run stops at the three checkpoints above.
 - `--auto` skips them. It still stops for blocking ticket questions, required planner questions, a secret found in the diff (including by a reviewer), an exhausted loop limit, blockers still open after the third review round, a rebase conflict, an analyst error, a GitHub account that is not logged in or cannot write to the repository, or a Jira connector that cannot reach the configured site.
-- A ticket missing information is parked in `.agentic-workflow/pending/<KEY>.md` with specific questions. Answer in the conversation, or edit the file and mark `operator_status: answered`; the next run picks it up first.
+- A ticket missing information is parked in `<run folder>/pending/<KEY>.md` with specific questions. Answer in the conversation, or edit the file and mark `operator_status: answered`; the next run picks it up first.
 - A ticket that already has a PR is never picked up again.
-- Re-running a key offers to resume from `.agentic-workflow/<KEY>/state.json`.
+- Re-running a key offers to resume from `<run folder>/<KEY>/state.json`.
 
 ## Write modes
 
-`writeMode` decides what the plugin may change in Jira: `none`, `labels` (only `agent-*` labels), `labels+comments` (adds question and PR comments), `labels+comments+transition` (adds status transitions). Setup mirrors it in permission rules: tools outside the mode are denied. Note that labels and question comments are written during triage, before the first checkpoint; choose `none` to avoid that.
+`writeMode` decides what the plugin may change in Jira: `none`, `labels` (only `agent-*` labels), `labels+comments` (adds question and PR comments), `labels+comments+transition` (adds status transitions). The plugin's guard enforces it for this repository only (no permission rules are written for it, so other repositories can use a different mode): it allows the analyst to use a Jira write tool inside the mode and blocks the rest. In a shared configuration it also never goes above the mode you accepted in setup. Note that labels and question comments are written during triage, before the first checkpoint; choose `none` to avoid that.
 
 ## Investigation
 
@@ -117,10 +128,10 @@ The full flow (when the stage starts, parallel execution, aggregation, the fix l
 `implementer` runs on Sonnet (`model: sonnet`: Sonnet 5.5 on the Anthropic API; on Bedrock, Vertex and Foundry the alias maps to an older Sonnet unless you set `ANTHROPIC_DEFAULT_SONNET_MODEL`) and has persistent memory (`memory: user`). Before it changes code it reads the spec, then learns what the spec does not tell it about the repository: structure, architecture, code style and standards, test and build commands, commit convention. It works on any stack; it discovers the manifests and configs that exist. The knowledge is saved globally, one file per repository, under `~/.claude/agent-memory/` (check the agent's subfolder there; the plugin does not depend on its name), so the next task starts informed.
 
 - It learns only what is missing and corrects only what the repository contradicts; there is no periodic re-learning. Each fact carries its source path, and what the agent puts into code or commands it re-verifies in the repo first.
-- It never stores ticket text or keys, `.agentic-workflow/` content, secrets or personal data, and nothing from code the feature branch added.
+- It never stores ticket text or keys, run-folder content, secrets or personal data, and nothing from code the feature branch added.
 - Nothing is written into your repository. To reset what it knows about a repo, delete that repo's file under `repos/` in the memory folder.
 - If auto memory is disabled (`autoMemoryEnabled`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY`) the agent still works, it just saves nothing.
-- `/agentic-workflow:setup` adds the permission rules for the memory folder. After updating the plugin, run it again, otherwise memory writes prompt (or are denied in an unattended run).
+- `/agentic-workflow:setup` adds the permission rules for the memory folder (in your user settings). After updating the plugin, run it again, otherwise memory writes prompt (or are denied in an unattended run).
 
 ## Configure
 
@@ -132,8 +143,9 @@ Personal options (`/plugin configure agentic-workflow`): `defaultAuto`. Everythi
 - Pull requests are drafts by default.
 - The diff is scanned for secrets before every push.
 - Ticket, comment, Confluence, code and web page text is treated as data, never as instructions.
-- The browser, when enabled, is read-only and limited to the origins you allow.
-- Jira writes go through one agent, within the `writeMode` you chose, and are enforced by permission rules.
+- The browser, when enabled, is read-only and limited to the origins you allow; the guard allows the analyst only the read tools, and only in repositories where you enabled it.
+- Jira writes go through one agent, within the `writeMode` you chose, and are enforced per repository by the plugin's guard hook, never by user-level deny rules. If you disable hooks (`disableAllHooks`), Jira writes and the browser fall back to asking for permission on every call.
+- Setup writes only `allow` rules, and only for what is the same in every repository.
 - No tokens or secrets are stored by the plugin; authorization is handled by Claude Code.
 
 ## Roadmap

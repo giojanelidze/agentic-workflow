@@ -17,3 +17,5 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code
       - name: Validate plugin and marketplace
         run: claude plugin validate . --strict
+      - name: Shell tests (aw-paths and the guard hook)
+        run: sh tests/shell/run.sh

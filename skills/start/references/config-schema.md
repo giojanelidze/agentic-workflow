@@ -2,7 +2,19 @@
 
 Written by `/agentic-workflow:setup`. Every field outside `jira` is optional; defaults apply when missing.
 
-## .claude/agentic-workflow.json (target repo, team-shared, may be committed)
+## Storage
+
+There are two files. Both are found with `bin/aw-paths`; the agents get their absolute paths from the orchestrator (`Config`, `Local`) and never compute them.
+
+- **Repository config** (`Config`): the settings that describe the project (Jira site and project, `baseBranch`, `jira.*`). The user chooses in setup where it lives, and the plugin derives the choice from the files that exist (`aw-paths` prints it as `mode`):
+  - **`team`**: `<repo>/.claude/agentic-workflow.json`, committed and shared with the team. A teammate's change reaches you through `git pull`, but it can never widen what the plugin may do for you: the guard and the preflight apply the lower of the shared `writeMode` and the `acceptedWriteMode` you chose in setup, and only the browser origins you accepted (`acceptedOrigins`, both in `local.json`). Setup does not rewrite keys that already exist in a shared file.
+  - **`personal`**: `~/.claude/agentic-workflow/repos/<host>/<owner>/<repo>/config.json`, same schema. Nothing is written into the repository.
+  - `none` (not set up) and `conflict` (both files exist) stop `start` and send the user to setup.
+- **Personal values** (`Local`): `~/.claude/agentic-workflow/repos/<host>/<owner>/<repo>/local.json`, always outside the repository.
+
+The run files (`State`) are outside the repository in both modes; see `state-schema.md`.
+
+## Repository config (`.claude/agentic-workflow.json` in team mode, `config.json` in personal mode)
 
 ```json
 {
@@ -36,13 +48,13 @@ Written by `/agentic-workflow:setup`. Every field outside `jira` is optional; de
 
 - `boardJql` must contain neither an assignee clause nor an `ORDER BY`; the analyst adds `assignee = <accountId>` and its own ordering.
 - `transitions.*` are transition **names**; the analyst resolves them to ids at call time.
-- `writeMode`: `none` | `labels` | `labels+comments` | `labels+comments+transition`. Setup mirrors it in the user's permission rules (write tools outside the mode go to `deny`).
+- `writeMode`: `none` | `labels` | `labels+comments` | `labels+comments+transition`. It is enforced by the plugin's guard hook (`hooks/guard`), per repository and only for the `jira-analyst`: the hook allows a write tool inside the mode and denies the rest. It is never written as a user-level permission rule, because a `deny` rule at user level would apply to every repository and every session at once. The effective mode is the lower of `writeMode` here and `acceptedWriteMode` in `local.json`.
 - `investigation` (optional): before asking the operator, the analyst looks for the answer in the repo (`code`, default true) and, if `browser` is set, in the running app. The browser is read-only, limited to `allowedOrigins`, and must point at a non-production environment. Without `browser` (or without `browserPrefix` in `local.json`) the browser is not used.
 - `baseBranch`: the branch feature branches start from and the pull request targets (`gh pr create --base`). `/agentic-workflow:setup` asks for it and writes it. Without it the orchestrator uses the repository's default branch, and asks if it cannot find one. It applies to the whole repository, not to a single ticket.
 - `commands.*` `null` means discover from `package.json`, `nx.json`, `Makefile`, CI config.
 - Defaults: `branchPattern` `<type>/<KEY>-<slug>` (`<type>` from the ticket type: `feat`, `fix`, `chore`), `commitFormat` `<KEY>: <summary>`, `prTitle` `[<KEY>] <summary>`, `prDraft` true, `baseBranch` from the repository's default branch (`gh-as … repo view --json defaultBranchRef`, or `git ls-remote --symref origin HEAD` without a GitHub binding).
 
-## .agentic-workflow/local.json (personal, excluded from git)
+## Personal values (`Local`, never in the repository)
 
 ```json
 {
@@ -50,17 +62,21 @@ Written by `/agentic-workflow:setup`. Every field outside `jira` is optional; de
   "operatorLanguage": "ka",
   "mcpPrefix": "mcp__claude_ai_Atlassian_Rovo__",
   "browserPrefix": "mcp__claude-in-chrome__",
-  "github": { "host": "github.com", "account": "octocat" }
+  "github": { "host": "github.com", "account": "octocat" },
+  "acceptedWriteMode": "labels+comments",
+  "acceptedOrigins": ["https://staging.example.com"]
 }
 ```
 
 `browserPrefix` (optional) is the tool-name prefix of the Claude in Chrome server, found by setup the same way as `mcpPrefix`.
 
+`acceptedWriteMode` and `acceptedOrigins` (the latter only when the browser is on) are the **ceiling**: the limits the user chose in setup. What applies in a run is the lower write mode (`min(jira.writeMode, acceptedWriteMode)`) and the overlap of `allowedOrigins` and `acceptedOrigins`. In team mode the shared file can change without the user (a `git pull`), and a user may deliberately accept less than the team file allows; either way the user's limit wins. The guard hook enforces these values, and the preflight of `start` computes them, says in one line when they differ from the config, and passes them to the analyst as `Write mode:` and `Browser origins:`. Nothing stops: accepting more is a choice made in `/agentic-workflow:setup --reconfigure jira|behavior`. The file is read by the guard line by line: keep the formatting setup writes, with every array of strings (such as `allowedOrigins`) on one line. In the default permission modes an agent cannot change this file without a permission prompt (setup is the only writer, in the main conversation); a mode that skips prompts removes that protection for any file.
+
 `github` binds this repository to one gh account: `host` is the real GitHub host (an SSH alias such as `github.com-personal` in the remote is resolved with `ssh -G`), `account` is the login whose token every gh call uses. It is personal because each person logs in with their own account. Neither a token nor `<owner>/<repo>` is stored: the repository is read from `origin` on every run. All gh calls go through `bin/gh-as --account <account> --host <host> <gh arguments>`, which hands that account's token (from `gh auth token --user`) to one gh process through `GH_TOKEN` (`GH_ENTERPRISE_TOKEN` for a host that is neither `github.com` nor `*.ghe.com`). gh's active account and config are never changed, so other terminals are not affected. Without a `github` section the publish stage only pushes and writes `pr.md` with a compare URL.
 
 ## Supported Atlassian prefixes
 
-`mcpPrefix` must be one of these; they are exactly the Atlassian entries in the `tools:` allowlist of `agents/jira-analyst.md`, which a subagent cannot go beyond. Keep this list and that allowlist identical. Setup offers only these and explains why it does not offer any other prefix it finds.
+`mcpPrefix` must be one of these; they are exactly the Atlassian entries in the `tools:` allowlist of `agents/jira-analyst.md`, which a subagent cannot go beyond. Keep this list, that allowlist and the matcher in `hooks/hooks.json` identical. Setup offers only these and explains why it does not offer any other prefix it finds.
 
 - `mcp__plugin_agentic-workflow_atlassian__` (the plugin's own server)
 - `mcp__claude_ai_Atlassian_Rovo__` (claude.ai connector)
@@ -79,8 +95,10 @@ Setup (when a configured repository is re-run, before it asks what to change) an
 
 `/agentic-workflow:setup` works in three stages and saves each one when it is finished, so an interrupted setup continues at the first stage whose keys are missing. This table says which stage owns which required key and which permission rules it writes. Optional keys (`jira.transitions.*`, `jira.investigation`, `browserPrefix`) never make setup incomplete when absent.
 
-| Stage | Required keys it owns | Permission rules it writes |
+| Stage | Required keys it owns | Permission rules it writes (always to the user's `~/.claude/settings.json`, only `allow`) |
 |---|---|---|
-| 1. Jira | `local.json`: `mcpPrefix`, `assigneeAccountId`. `jira`: `cloudId`, `baseUrl`, `projectKey`, `boardJql`, `openStatuses`, `issueTypes`, `confluenceSpaces`, `confluenceMaxPages`, `writeMode` | the Jira allow/deny rules for `mcpPrefix` (read tools, the write tools `writeMode` permits, the rest denied) and `Bash(wait-mcp *)` |
+| 1. Jira | the storage choice (which creates `Config`: the team file or `config.json`). `local.json`: `mcpPrefix`, `assigneeAccountId`, `acceptedWriteMode`. `jira`: `cloudId`, `baseUrl`, `projectKey`, `boardJql`, `openStatuses`, `issueTypes`, `confluenceSpaces`, `confluenceMaxPages`, `writeMode` | read tools of `mcpPrefix`, `Bash(wait-mcp *)`, `Bash(aw-paths)`, `Bash(aw-paths *)`, `Read(~/.claude/agentic-workflow/**)` and `Edit(~/.claude/agentic-workflow/state/**)` |
 | 2. GitHub and repo | `local.json`: `github.host`, `github.account`. Top level: `baseBranch`. `jira.implementerScope` | `Bash(gh-as --account <account> --host <host> …)` read rules and `Bash(wait-gh-login *)` |
-| 3. Behavior | `local.json`: `operatorLanguage`. `jira.maxCandidatesPerRun` | browser rules (when enabled) and the implementer memory rules |
+| 3. Behavior | `local.json`: `operatorLanguage`. `jira.maxCandidatesPerRun`. With the browser on: `browserPrefix` and `acceptedOrigins` | the implementer memory rules (`Read` and `Edit` on `~/.claude/agent-memory/**`) |
+
+No stage writes a `deny` rule, a rule for a Jira write tool or a browser rule: those depend on the repository and are decided by the guard hook (`hooks/guard`) from the files above. The `Edit` rule is written for the run-file tree `state/` only, never for `local.json` or `config.json`, so a subagent cannot widen its own permissions.

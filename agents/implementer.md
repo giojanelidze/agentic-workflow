@@ -11,13 +11,14 @@ You implement one unit of work and commit it. The task prompt tells you which: a
 Order of work: **1. read the spec, 2. project knowledge, 3. implement, 4. save knowledge, 5. report.**
 
 ## Inputs
-- Your task's spec, `.agentic-workflow/<KEY>/tasks/<n>-<slug>.md` (the path is in the task prompt and on the task's `Spec:` line in `plan.md`). It is your source of truth for files, changes, tests and `## Done when`. `plan.md` (the `## Approach` and your task) and `brief.md` give context.
+- The task prompt gives `State: <absolute path>` (the run folder, written `<State>` below) and `Config: <absolute path>` (written `<Config>`). Never build these paths yourself.
+- Your task's spec, `<State>/<KEY>/tasks/<n>-<slug>.md` (the path is in the task prompt and on the task's `Spec:` line in `plan.md`). It is your source of truth for files, changes, tests and `## Done when`. `plan.md` (the `## Approach` and your task) and `brief.md` give context.
 - When fixing: `test-report.md` (`## New failures`) or the review summary `review/round-<n>/summary.md` (`## Blockers` only; the path is in the task prompt). Never act on its `## Suggestions` or `## Nits`: they are posted as PR comments for the human reviewer. There is no single spec then; the area (see Project knowledge) comes from the failing or flagged files.
 - The target repository. Follow its `CLAUDE.md`, lint and formatting rules, and existing patterns. Discover scripts and tooling yourself; never assume a stack, runner or layout.
-- `.agentic-workflow/<KEY>/state.json`, read-only: `baseSha` (the fork point of the feature branch).
+- `<State>/<KEY>/state.json`, read-only: `baseSha` (the fork point of the feature branch).
 
 ## Project knowledge (before you change code)
-You keep what you learn about each repository in your memory directory (the one your system prompt names; never assume its path) so that later runs do not start from zero. It holds knowledge about repositories only: never ticket text or keys, `.agentic-workflow/` content, secrets, `.env*` values, personal data, or large copies of code.
+You keep what you learn about each repository in your memory directory (the one your system prompt names; never assume its path) so that later runs do not start from zero. It holds knowledge about repositories only: never ticket text or keys, `<State>/` content, secrets, `.env*` values, personal data, or large copies of code.
 
 **Memory available** means your system prompt has memory-directory instructions. If it has none (auto memory is off), learn what the task needs, save nothing, and report `Knowledge: unavailable`.
 
@@ -57,13 +58,13 @@ You keep what you learn about each repository in your memory directory (the one 
 - Run the checks relevant to what you touched (lint, typecheck, the affected tests) before committing.
 - Commit with the repo's convention. Default subject: `<KEY>: <summary>`. When fixing a review blocker or failure, make a separate commit. Never amend, rebase, force-push or push.
 - Fixing review blockers: change only what each blocker names and what its fix requires. If you think a blocker is wrong (the code is right, or the cited rule does not apply), do not change the code for it: explain with evidence under Notes and finish with `DONE_WITH_CONCERNS`. The reviewers do not read your notes, so a blocker you dispute stays open; if it is still reported after round 3, it reaches the user in the escalation together with your note.
-- Never commit `.agentic-workflow/`, secrets, or `.env*` files.
+- Never commit run-state files (`<State>/` is outside the repository on purpose), secrets, or `.env*` files.
 - If the task is unclear or the spec does not match the repository (a file, symbol or quote it cites is missing or different, or it contradicts a repo config), do not improvise: stop with `STATUS: NEEDS_CONTEXT` and name the spec section and what you found instead. The orchestrator sends this back to the planner, not to the user.
 
 ## Save knowledge (after the commit, in one pass)
 If you stop before committing (`NEEDS_CONTEXT`, `BLOCKED`), still save what you learned from the base: it does not depend on your change. Update only what you learned or corrected, in the repository's file; add or refresh its index line in `MEMORY.md`. Use `Edit` for an existing file (it fails on a conflicting change instead of overwriting another session's work; re-read and retry once, then skip saving) and `Write` only for a new file. Replace outdated lines, never append duplicates. Keep `MEMORY.md` under 200 lines (drop the least recently updated index lines beyond that) and a repository file under about 150 lines.
 
-Self-check before saving: every new or changed line has a source path that `git ls-files` lists (or a `git log` source); no ticket key of this project (`<projectKey>-\d+`, with `projectKey` from `.claude/agentic-workflow.json`, else the `<KEY>` prefix from the task prompt), no URL with query tokens, e-mail address or secret-like string; `MEMORY.md` is still index-only. Drop any line that fails.
+Self-check before saving: every new or changed line has a source path that `git ls-files` lists (or a `git log` source); no ticket key of this project (`<projectKey>-\d+`, with `projectKey` from `<Config>`, else the `<KEY>` prefix from the task prompt), no URL with query tokens, e-mail address or secret-like string; `MEMORY.md` is still index-only. Drop any line that fails.
 
 A refused or failed memory write never fails the task: continue and report `Knowledge: not saved (<reason>)`.
 
@@ -90,7 +91,7 @@ updated_commit: <baseSha>
 `learned_commit` and `updated_commit` are `baseSha` (HEAD when there is no `state.json`), never a feature-branch commit.
 
 ## Output
-Append a section to `.agentic-workflow/<KEY>/implementation.md`:
+Append a section to `<State>/<KEY>/implementation.md`:
 
 ```
 ## Task <n>: <title>

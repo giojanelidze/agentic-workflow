@@ -1,0 +1,183 @@
+#!/bin/sh
+# guard: PreToolUse hook of agentic-workflow. It decides, per repository, what the jira-analyst
+# may do with the Jira write tools and with the browser. It replaces user-level permission
+# "deny" rules, which would apply to every repository and every session at once.
+#
+# It only ever speaks about calls made by the agent `agentic-workflow:jira-analyst` (the hook
+# input carries `agent_type`); every other caller gets no answer (exit 0, no output), so the
+# normal permission flow applies to the main thread and to every other agent.
+#
+# For the analyst it answers "allow" or "deny" and never "ask":
+#   * editJiraIssue / addCommentToJiraIssue / transitionJiraIssue: allowed when the Atlassian
+#     prefix is the one this repository is bound to (`mcpPrefix` in local.json) and the effective
+#     write mode reaches the tool: labels -> edit, labels+comments -> comment, +transition -> transition.
+#     The effective mode is the lower of `jira.writeMode` in the config and `acceptedWriteMode` in
+#     local.json, so a config that grew through a `git pull` never widens what the user accepted.
+#   * Claude in Chrome: only when the repository enables the browser (`allowedOrigins` in the config, at
+#     least one of them also listed in `acceptedOrigins` of local.json, and `browserPrefix` in local.json)
+#     and only the read tools below; everything else is denied. The browser then works on that overlap only.
+# Anything it cannot read or understand is denied (fail closed). Plain POSIX sh; no jq or python.
+
+here="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || here=""
+
+emit() {
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"%s","permissionDecisionReason":"%s"}}\n' "$1" "$2"
+  exit 0
+}
+deny() { emit deny "agentic-workflow: $1"; }
+
+# --- read the hook input ------------------------------------------------------------------
+# A small JSON tokenizer that returns only string values found at depth 1 of the top-level object
+# (agent_type, tool_name, cwd). `tool_input` is controlled by the model and is nested deeper, so a
+# decoy key inside it can never be mistaken for one of these. A value that contains a backslash
+# escape is reported as <key>_esc=1 and treated as unreadable.
+parsed="$(awk '
+  function finish() {
+    if (depth == 1) {
+      if (strprev == "{" || strprev == ",") { key = buf }
+      else if (strprev == ":" && (key == "agent_type" || key == "tool_name" || key == "cwd")) {
+        val[key] = buf; hasesc[key] = sawesc; seen[key] = 1
+      }
+    }
+    prev = "s"
+  }
+  {
+    n = length($0)
+    for (i = 1; i <= n; i++) {
+      c = substr($0, i, 1)
+      if (instr) {
+        if (isesc) { isesc = 0; if (keep) buf = buf c; continue }
+        if (c == "\\") { isesc = 1; sawesc = 1; if (keep) buf = buf c; continue }
+        if (c == "\"") { instr = 0; finish(); continue }
+        if (keep) buf = buf c
+        continue
+      }
+      if (c == "\"") { instr = 1; sawesc = 0; buf = ""; keep = (depth == 1); strprev = prev; continue }
+      if (c == " " || c == "\t" || c == "\r") continue
+      if (c == "{" || c == "[") { depth++; prev = c; continue }
+      if (c == "}" || c == "]") { depth--; prev = c; continue }
+      if (c == "," || c == ":") { prev = c; continue }
+      prev = "v"
+    }
+  }
+  END {
+    split("agent_type tool_name cwd", names, " ")
+    for (j = 1; j <= 3; j++) {
+      k = names[j]
+      if (seen[k]) { print k "=" val[k]; if (hasesc[k]) print k "_esc=1" }
+    }
+  }
+' 2>/dev/null)"
+
+agent_type=""; tool_name=""; cwd=""; flagged=0
+while IFS= read -r line; do
+  case "$line" in
+    agent_type=*) agent_type="${line#agent_type=}" ;;
+    tool_name=*)  tool_name="${line#tool_name=}" ;;
+    cwd=*)        cwd="${line#cwd=}" ;;
+    *_esc=1)      flagged=1 ;;
+  esac
+done <<EOF
+$parsed
+EOF
+
+# Not the analyst: no opinion.
+[ "$agent_type" = "agentic-workflow:jira-analyst" ] || exit 0
+
+[ "$flagged" = 0 ] || deny "the hook input could not be read safely."
+[ -n "$tool_name" ] || deny "the hook input has no tool name."
+[ -n "$cwd" ] || deny "the hook input has no working directory."
+
+# --- find this repository's files -----------------------------------------------------------
+aw="$here/../bin/aw-paths"
+[ -x "$aw" ] || deny "bin/aw-paths is missing from the plugin."
+paths="$("$aw" --cwd "$cwd" 2>/dev/null)" || deny "cannot tell which repository this is (run /agentic-workflow:setup)."
+
+mode=""; config=""; local_file=""
+while IFS= read -r line; do
+  case "$line" in
+    mode=*)   mode="${line#mode=}" ;;
+    config=*) config="${line#config=}" ;;
+    local=*)  local_file="${line#local=}" ;;
+  esac
+done <<EOF
+$paths
+EOF
+
+case "$mode" in
+  team|personal) ;;
+  conflict) deny "this repository has a team config and a personal config (run /agentic-workflow:setup)." ;;
+  *)        deny "this repository is not set up (run /agentic-workflow:setup)." ;;
+esac
+[ -r "$config" ] || deny "the repository config cannot be read (run /agentic-workflow:setup)."
+[ -r "$local_file" ] || deny "the personal config cannot be read (run /agentic-workflow:setup)."
+
+# --- tiny readers for the two config files (written by setup, one key per line) --------------
+# String value of a key, or nothing.
+jget() {
+  tr -d '\n\r' < "$1" | sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+# Items of an array of strings, one per line.
+jarray() {
+  tr -d '\n\r' < "$1" | sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' |
+    tr ',' '\n' | sed 's/^[[:space:]]*"//; s/"[[:space:]]*$//' | sed '/^$/d'
+}
+level() {
+  case "$1" in
+    none) echo 0 ;;
+    labels) echo 1 ;;
+    labels+comments) echo 2 ;;
+    labels+comments+transition) echo 3 ;;
+    *) echo 0 ;;
+  esac
+}
+
+# --- decide ------------------------------------------------------------------------------------
+need=0; short=""; browser=0
+case "$tool_name" in
+  *__editJiraIssue)         short=editJiraIssue; need=1 ;;
+  *__addCommentToJiraIssue) short=addCommentToJiraIssue; need=2 ;;
+  *__transitionJiraIssue)   short=transitionJiraIssue; need=3 ;;
+  mcp__claude-in-chrome__*) browser=1 ;;
+  *) exit 0 ;;
+esac
+
+if [ "$browser" = 0 ]; then
+  prefix="${tool_name%"$short"}"
+  [ "$prefix" = "$(jget "$local_file" mcpPrefix)" ] ||
+    deny "this repository is bound to another Atlassian connector, so $short is not allowed."
+  cfg_level="$(level "$(jget "$config" writeMode)")"
+  acc_level="$(level "$(jget "$local_file" acceptedWriteMode)")"
+  eff="$cfg_level"
+  [ "$acc_level" -lt "$eff" ] && eff="$acc_level"
+  if [ "$eff" -ge "$need" ]; then
+    emit allow "agentic-workflow: the write mode of this repository permits $short."
+  fi
+  if [ "$cfg_level" -gt "$acc_level" ]; then
+    deny "the config asks for a wider write mode than you accepted in setup, so $short is blocked (run /agentic-workflow:setup --reconfigure jira)."
+  fi
+  deny "the write mode of this repository does not permit $short."
+fi
+
+# Browser.
+prefix="mcp__claude-in-chrome__"
+short="${tool_name#"$prefix"}"
+enabled=0
+if [ "$(jget "$local_file" browserPrefix)" = "$prefix" ]; then
+  origins="$(jarray "$config" allowedOrigins)"
+  accepted="$(jarray "$local_file" acceptedOrigins)"
+  if [ -n "$origins" ] && [ -n "$accepted" ]; then
+    while IFS= read -r origin; do
+      printf '%s\n' "$accepted" | grep -Fxq -- "$origin" && enabled=1
+    done <<EOF
+$origins
+EOF
+  fi
+fi
+[ "$enabled" = 1 ] || deny "the browser is not enabled for this repository, so $short is blocked."
+case "$short" in
+  tabs_context_mcp|tabs_create_mcp|tabs_close_mcp|navigate|get_page_text|read_page|find|computer)
+    emit allow "agentic-workflow: $short is one of the read-only browser tools of the analyst." ;;
+  *)
+    deny "$short is not one of the read-only browser tools of the analyst." ;;
+esac

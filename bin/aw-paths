@@ -1,0 +1,171 @@
+#!/bin/sh
+# aw-paths: where agentic-workflow keeps its files for the repository in a directory.
+#
+# usage: aw-paths [--cwd <dir>] [--get <key>]
+#
+# Prints one key=value line per fact (values may contain spaces: never eval the output):
+#   host owner repo   from `origin` (an SSH alias is resolved with `ssh -G`); the host is lower case
+#   root              the top directory of the working tree
+#   mode              none | team | personal | conflict
+#                       team      .claude/agentic-workflow.json exists in the repository
+#                       personal  config.json exists in the per-repository folder below
+#                       conflict  both exist (setup asks which one to keep)
+#                       none      neither exists
+#   config            the active config file (empty for none and conflict)
+#   team_config       <root>/.claude/agentic-workflow.json
+#   personal_config   <base>/repos/<host>/<owner>/<repo>/config.json
+#   local             <base>/repos/<host>/<owner>/<repo>/local.json   (personal values, never in the repository)
+#   state             <base>/state/<host>/<owner>/<repo>               (run files: ledger, briefs, plans, reports)
+#   legacy            <root>/.agentic-workflow when that folder exists, else empty (older plugin versions)
+# where <base> is $HOME/.claude/agentic-workflow and owner, repo and host are lower-cased in the path.
+# The run files have their own tree on purpose: a permission rule for <base>/state/** must never be able to
+# match local.json or config.json, whatever a repository or an owner is called (even "state").
+#
+# --get <key> prints only that value. Exit codes: 0 ok, 2 bad usage, 3 not a git repository,
+# 4 no usable `origin`, 5 an unsafe name or no HOME. It reads and changes nothing.
+# Plain POSIX sh; no jq or python needed.
+
+usage() {
+  echo "usage: aw-paths [--cwd <dir>] [--get <key>]" >&2
+  exit 2
+}
+
+cwd="."
+get=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --cwd) [ $# -ge 2 ] || usage; cwd="$2"; shift 2 ;;
+    --get) [ $# -ge 2 ] || usage; get="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+
+# A name that ends up in a path: letters, digits, dot, underscore, hyphen; never empty, "." or "..",
+# and no leading hyphen (it must not look like an option for ssh).
+safe() {
+  case "$1" in
+    ''|.|..|-*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+lower() {
+  printf '%s' "$1" | tr 'A-Z' 'a-z'
+}
+
+root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || root=""
+if [ -z "$root" ]; then
+  echo "aw-paths: not inside a git repository: $cwd" >&2
+  exit 3
+fi
+
+url="$(git -C "$root" remote get-url origin 2>/dev/null)" || url=""
+if [ -z "$url" ]; then
+  echo "aw-paths: this repository has no 'origin' remote" >&2
+  exit 4
+fi
+
+host=""
+path=""
+viassh=0
+case "$url" in
+  *://*)
+    scheme="${url%%://*}"
+    rest="${url#*://}"
+    case "$rest" in
+      */*) hostport="${rest%%/*}"; path="${rest#*/}" ;;
+      *)   hostport=""; path="" ;;
+    esac
+    hostport="${hostport##*@}"
+    host="${hostport%%:*}"
+    [ "$scheme" = ssh ] && viassh=1
+    ;;
+  *:*)
+    # scp-like form: [user@]host:owner/repo.git
+    left="${url%%:*}"
+    path="${url#*:}"
+    case "$left" in
+      */*) host="" ;;
+      *)   host="${left##*@}"; viassh=1 ;;
+    esac
+    ;;
+esac
+
+path="${path%/}"
+path="${path%.git}"
+path="${path%/}"
+case "$path" in
+  */*) ;;
+  *) path="" ;;
+esac
+repo="${path##*/}"
+upper="${path%/*}"
+owner="${upper##*/}"
+
+if [ -z "$host" ] || [ -z "$owner" ] || [ -z "$repo" ]; then
+  echo "aw-paths: cannot read host, owner and repository from origin" >&2
+  exit 4
+fi
+safe "$host" && safe "$owner" && safe "$repo" || {
+  echo "aw-paths: origin has a host, owner or repository name with unsupported characters" >&2
+  exit 5
+}
+
+# An SSH alias (for example github.com-personal) is not the real host: ask ssh what it resolves to.
+if [ "$viassh" = 1 ] && command -v ssh >/dev/null 2>&1; then
+  real="$(ssh -G -- "$host" 2>/dev/null | awk '$1 == "hostname" { print $2; exit }')"
+  if [ -n "$real" ]; then
+    safe "$real" || {
+      echo "aw-paths: ssh resolved the host to an unsupported name" >&2
+      exit 5
+    }
+    host="$real"
+  fi
+fi
+
+if [ -z "${HOME:-}" ]; then
+  echo "aw-paths: HOME is not set" >&2
+  exit 5
+fi
+
+lhost="$(lower "$host")"
+base="$HOME/.claude/agentic-workflow"
+sub="$lhost/$(lower "$owner")/$(lower "$repo")"
+dir="$base/repos/$sub"
+team="$root/.claude/agentic-workflow.json"
+personal="$dir/config.json"
+
+if [ -f "$team" ] && [ -f "$personal" ]; then
+  mode=conflict; config=""
+elif [ -f "$team" ]; then
+  mode=team; config="$team"
+elif [ -f "$personal" ]; then
+  mode=personal; config="$personal"
+else
+  mode=none; config=""
+fi
+
+legacy=""
+[ -d "$root/.agentic-workflow" ] && legacy="$root/.agentic-workflow"
+
+out="host=$lhost
+owner=$owner
+repo=$repo
+root=$root
+mode=$mode
+config=$config
+team_config=$team
+personal_config=$personal
+local=$dir/local.json
+state=$base/state/$sub
+legacy=$legacy"
+
+if [ -n "$get" ]; then
+  # Print the value of one key (nothing and exit 2 for an unknown key).
+  printf '%s\n' "$out" | awk -v k="$get" '
+    { i = index($0, "="); if (substr($0, 1, i - 1) == k) { print substr($0, i + 1); found = 1; exit } }
+    END { exit found ? 0 : 2 }'
+  exit $?
+fi
+
+printf '%s\n' "$out"

@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^mcp__(plugin_agentic-workflow_atlassian|claude_ai_Atlassian_Rovo|claude_ai_Atlassian_Rovo_2)__(editJiraIssue|addCommentToJiraIssue|transitionJiraIssue)$|^mcp__claude-in-chrome__",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/guard\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
