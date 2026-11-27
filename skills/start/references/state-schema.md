@@ -26,6 +26,7 @@ Which config applies (`mode`) is derived from which files exist: the repository 
 | `ledger.json`, `lock.json`, `last_run.json`, `pending/` | `jira-analyst` | triage state of tickets, run lease, last run report, questions awaiting answers (the user may edit a file in `pending/` and mark it `operator_status: answered`) |
 | `local.json` (in `repos/…`, not in `State`) | `/agentic-workflow:setup` | personal Jira and GitHub settings (connector prefix, target user, gh account) and the accepted ceiling (`acceptedWriteMode`, `acceptedOrigins`) |
 | `config.json` (in `repos/…`, personal mode) | `/agentic-workflow:setup` | the repository config |
+| `operator-decisions.jsonl` | the orchestrator (only through `aw-decisions add`) | how the operator answered earlier questions: ids, codes and categories, never question or ticket text; read through `aw-decisions stats` and `streak` |
 | `<KEY>/brief.md` | `jira-analyst` | handoff to the planner |
 | `<KEY>/media/<hash>/raw/`, `view/`, `manifest.json` | `jira-analyst` (through `jira-attachment` and `media-prep`) | the ticket's downloaded attachments, the frames made from them, and the list the viewer reads. `<hash>` identifies the set of attachments (`media-prep hash`), so a changed attachment gives a new folder. A cache of downloads: written also in `--dry-run`, never holds ticket text, and `raw/` keeps only still images (a video is deleted once its frames exist) |
 | `<KEY>/media/<hash>/findings-<n>.md` | orchestrator (the `/agentic-workflow:start` and `/agentic-workflow:media` skills) | the verbatim reply of the `media-analyst`, after `media-prep validate`, or the one line `REJECTED: <reason>`. Never overwritten (`--refresh` writes the next number), because a `brief.md` may cite it. Neither the planner nor the implementer opens these files or the frames |
@@ -61,6 +62,7 @@ Older versions kept all of this in `<repo>/.agentic-workflow/`. `/agentic-workfl
       "jira_updated_seen": "2026-10-28T10:15:00.000+0000",
       "first_seen": "2026-10-27T09:00:00Z", "last_evaluated": "2026-10-28T10:16:00Z",
       "reason": "Missing repro steps", "attempts": 0, "rounds": 1, "reopens": 0,
+      "confidence": 0.8, "confidence_reasons": ["-0.10 - Confluence unavailable | searchConfluenceUsingCql failed"],
       "transitioned_to": null,
       "commentIds": { "NEEDS_INFO#1": "10042" },
       "history": [{ "at": "…", "from": "ANALYZING", "to": "NEEDS_INFO" }]
@@ -70,6 +72,10 @@ Older versions kept all of this in `<repo>/.agentic-workflow/`. `/agentic-workfl
 ```
 
 States: `DISCOVERED, ANALYZING, READY, NEEDS_INFO, ANSWERED, REJECTED, HANDED_OFF, PR_OPEN, DONE, STALE, CLOSED_EXTERNALLY`. `HANDED_OFF → NEEDS_INFO` happens only through the analyst's `reopen <KEY>` (the planner found a Definition of Ready gap). `reopens` (default 0) counts those reopens, at most 2 per ticket, and is separate from `rounds`; their comment key is `NEEDS_INFO#R<reopens>`. `history` keeps the last 10 entries. Keys in `HANDED_OFF`, `PR_OPEN`, `DONE`, `REJECTED` are never picked up again by `next`. `PR_OPEN` becomes `DONE` only when the ticket reaches a Jira status category `Done` (leaving `openStatuses` is not enough: the analyst's own transitions do that). `rounds` counts question rounds asked; `transitioned_to` is the status the analyst's own transition produced; `commentIds` keys are `NEEDS_INFO#<rounds>`, `HANDED_OFF`, `PR_OPEN`. With `--dry-run` the analyst changes none of this.
+
+## operator-decisions.jsonl (orchestrator)
+
+One JSON object per line, written by `aw-decisions add`: `id` (`D<n>`), `date`, `key`, `stage` (`plan|analysis`), `tag` (`Tech` or `DoR:<code>`), `category`, `followed` (`true|false|none`), `source` (`operator`, or `operator-checkpoint` for a choice of the planner accepted or changed at checkpoint 1), `confidence` (may be empty), `answer` (only `DoR:S2` and `DoR:S4`: `follow-existing|new-design|out-of-scope|handle|other`). It is shared by every clone of the repository and kept when a run folder `<KEY>/` is deleted. Delete the file to make the agents forget.
 
 ## state.json (orchestrator)
 
@@ -81,7 +87,7 @@ States: `DISCOVERED, ANALYZING, READY, NEEDS_INFO, ANSWERED, REJECTED, HANDED_OF
   "base": "main", "branch": "feat/ABC-123-add-export", "baseSha": "abc1234",
   "github": { "host": "github.com", "repo": "octocat/hello", "account": "octocat" },
   "tasks": [{ "n": 1, "title": "…", "spec": "tasks/1-add-export.md", "status": "pending | in_progress | done | blocked" }],
-  "planAnswers": [{ "id": "P1", "tag": "Tech", "question": "…", "answer": "…", "source": "operator | operator-delegated" }],
+  "planAnswers": [{ "id": "P1", "tag": "Tech", "question": "…", "answer": "…", "source": "operator | operator-delegated | agent-decided" }],
   "counters": { "testLoop": 0, "implementerRuns": 0, "needsInputTickets": 0, "planRounds": 0, "planEdits": 0 },
   "lastFailureSignature": null,
   "lastPlanQuestions": [],
@@ -97,6 +103,6 @@ States: `DISCOVERED, ANALYZING, READY, NEEDS_INFO, ANSWERED, REJECTED, HANDED_OF
 
 `github` is the GitHub binding found by the preflight of the current run (rewritten every time the file is created or loaded, also on a resume): `host` and `account` from `Local`, `repo` (`<owner>/<repo>`) read from `origin`. The orchestrator passes it to `pr-publisher`; it is absent (`null`) when there is no binding or no `gh`, and the publish stage then only pushes and writes `pr.md`.
 
-Planning fields: `planAnswers` holds every question answered in this run (`P<n>` from the planner, `E<n>` for operator edits at checkpoint 1); all of them are passed to each planner run so a question is never asked twice. `planRounds` counts planner re-runs caused by a reopen, a technical question or a spec mismatch (max 3); `planEdits` counts re-runs caused by an edit at checkpoint 1 (max 2). `lastPlanQuestions` keeps the signatures (tag + normalized text) of the previous run's required questions: the same signature twice ends the loop.
+Planning fields: `planAnswers` holds every question answered in this run (`P<n>` from the planner, `E<n>` for operator edits at checkpoint 1); all of them are passed to each planner run so a question is never asked twice. It also holds the planner's own choices (`A<n>`, `source: agent-decided`, the choice as `answer`), so a re-run keeps them; an `E<n>` that changes one replaces it. `planRounds` counts planner re-runs caused by a reopen, a technical question or a spec mismatch (max 3); `planEdits` counts re-runs caused by an edit at checkpoint 1 (max 2). `lastPlanQuestions` keeps the signatures (tag + normalized text) of the previous run's required questions: the same signature twice ends the loop.
 
 Review fields: `lastCheckSha` is HEAD at the last `test-runner` check that returned `PASS`; the review stage starts only when it equals HEAD. `reviewRounds` has one entry per review round (`n`, the reviewed commit `sha`, and the aggregator's `verdict`, `null` until it ran); its length is the round count (max 3) and `delta.patch` of round `n + 1` is taken from the `sha` of round `n`. `reviewOverride` is `publish-with-blockers` when the user chose to publish a draft PR after the escalation, otherwise `null`. See `review-workflow.md`.

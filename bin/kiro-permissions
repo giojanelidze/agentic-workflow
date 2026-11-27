@@ -18,7 +18,8 @@
 #
 # Only allow rules, and only what is the same in every repository or is needed to run the workflow:
 #   mcp       the read tools of the Atlassian server (never a write tool)
-#   shell     aw-paths and the guard's alive check (exact commands), read-only gh-as commands (written with
+#   shell     aw-paths and the guard's alive check (exact commands), aw-decisions (the answer history in the run
+#             folder; the script refuses any other folder), read-only gh-as commands (written with
 #             --hostname: Kiro refuses a command that contains `--host <word>`) of the given
 #             accounts, and with --pictures jira-attachment get|check and media-prep
 #   fs_read   this plugin folder (its real path: Kiro resolves symlinks before it matches) and
@@ -107,6 +108,7 @@ build() { # indent-string
   line "$j" "effect: allow"
   line "$j" "match:"
   item "$PLUG/bin/aw-paths --tool kiro"
+  item "$PLUG/bin/aw-decisions *"
   item "$PLUG/hooks/guard --tool kiro --check-alive"
   printf '%s\n' "$github" | while IFS= read -r g; do
     [ -n "$g" ] || continue

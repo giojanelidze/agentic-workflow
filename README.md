@@ -109,6 +109,7 @@ Setup is the only writer of the configuration and of your personal values, and C
 ```
 
 - By default the run stops at the three checkpoints above.
+- The agents ask only when they are less than 85% sure. A choice they are sure enough about is made by the agent, listed at the first checkpoint and in the pull request, and can be changed there. They learn per category from your answers (`<run folder>/operator-decisions.jsonl`; delete it to start over). Dependencies, public APIs, migrations, security, payment, data loss, contradictions and the goal and acceptance criteria are always asked.
 - `--auto` skips them. It still stops for blocking ticket questions, required planner questions, a secret found in the diff (including by a reviewer), an exhausted loop limit, blockers still open after the third review round, a rebase conflict, an analyst error, a GitHub account that is not logged in or cannot write to the repository, or a Jira connector that cannot reach the configured site.
 - A ticket missing information is parked in `<run folder>/pending/<KEY>.md` with specific questions. Answer in the conversation, or edit the file and mark `operator_status: answered`; the next run picks it up first.
 - A ticket that already has a PR is never picked up again.

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Shell tests for bin/aw-paths, hooks/guard, bin/gh-as, bin/kiro-permissions, bin/kiro-install, bin/jira-attachment and bin/media-prep. No network, no claude CLI, no real HOME,
+# Shell tests for bin/aw-paths, hooks/guard, bin/gh-as, bin/kiro-permissions, bin/kiro-install, bin/jira-attachment, bin/media-prep and bin/aw-decisions. No network, no claude CLI, no real HOME,
 # no real keychain (fake security/curl/ffmpeg).
 # Run: sh tests/shell/run.sh   (npm test runs it after the plugin validation)
 
@@ -442,6 +442,7 @@ printed="$(kp print --github octo@github.com)"
 contains "kp the block starts with a marker" "# >>> agentic-workflow" "$printed"
 contains "kp the block ends with a marker" "# <<< agentic-workflow" "$printed"
 contains "kp aw-paths is an exact command, no star" '- "~/.kiro/agentic-workflow-plugin/bin/aw-paths --tool kiro"' "$printed"
+contains "kp aw-decisions" '- "~/.kiro/agentic-workflow-plugin/bin/aw-decisions *"' "$printed"
 contains "kp the alive check is an exact command" '- "~/.kiro/agentic-workflow-plugin/hooks/guard --tool kiro --check-alive"' "$printed"
 contains "kp read-only gh-as with the account and the host" '- "~/.kiro/agentic-workflow-plugin/bin/gh-as --account octo --hostname github.com repo view *"' "$printed"
 contains "kp gh-as pr checks" '--account octo --hostname github.com pr checks *"' "$printed"
@@ -960,7 +961,7 @@ grep -q '^disallowedTools: .*Bash' "$ROOT/agents/media-analyst.md" && pass=$((pa
 if grep '^tools:' "$ROOT/agents/jira-analyst.md" | grep -Eq '\b(Agent|Task)\b'; then fail=$((fail + 1)); echo "FAIL: jira-analyst must not have the Agent tool (it reads untrusted text)" >&2; else pass=$((pass + 1)); fi
 
 # permissions of the shipped scripts
-for f in bin/aw-paths bin/gh-as bin/wait-gh-login bin/wait-mcp bin/jira-attachment bin/media-prep bin/kiro-install bin/kiro-permissions hooks/guard; do
+for f in bin/aw-paths bin/aw-decisions bin/gh-as bin/wait-gh-login bin/wait-mcp bin/jira-attachment bin/media-prep bin/kiro-install bin/kiro-permissions hooks/guard; do
   if [ -x "$ROOT/$f" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); printf 'FAIL: %s is not executable\n' "$f" >&2; fi
 done
 # the hook matcher must name exactly the Atlassian prefixes the analyst may use
@@ -997,6 +998,87 @@ ATTCMD="$(sed -n 's/.*`\(git log -i -E[^`]*\)`.*/\1/p' "$ROOT/agents/pr-publishe
 contains "attribution check: the command is found in pr-publisher.md" 'origin/main..HEAD' "$ATTCMD"
 ATTHITS="$(cd "$ATT" && sh -c "$ATTCMD" | sed 's/^[0-9a-f]* //' | sort | tr '\n' ',')"
 eq "attribution check flags the four attributed commits and nothing else" "generated,lower case trailer,session,trailer," "$ATTHITS"
+
+# ---------------------------------------------------------------- aw-decisions
+AWD="$ROOT/bin/aw-decisions"
+DS="$TMP/home/.claude/agentic-workflow/state/github.com/octo/hello"
+DF="$DS/operator-decisions.jsonl"
+dadd() { # category followed [extra args]
+  c="$1"; f="$2"; shift 2
+  "$AWD" add --state "$DS" --key ABC-1 --stage plan --tag Tech --category "$c" --followed "$f" --source operator "$@"
+}
+eq "awd stats without history is empty" "0:" "$(out="$("$AWD" stats --state "$DS")"; echo "$?:$out")"
+eq "awd streak without history is empty" "0:" "$(out="$("$AWD" streak --state "$DS")"; echo "$?:$out")"
+eq "awd the first record is D1" D1 "$(dadd naming true --confidence 0.50)"
+eq "awd the second record is D2" D2 "$(dadd naming false)"
+eq "awd one line per record" 2 "$(grep -c . "$DF")"
+contains "awd the record holds the fields" '"key":"ABC-1","stage":"plan","tag":"Tech","category":"naming","followed":"true","source":"operator","confidence":"0.50","answer":""}' "$(sed -n 1p "$DF")"
+eq "awd stats counts followed and overridden" "naming followed=1 overridden=1" "$("$AWD" stats --state "$DS")"
+dadd naming none >/dev/null
+dadd other true >/dev/null
+eq "awd stats skips none and other" "naming followed=1 overridden=1" "$("$AWD" stats --state "$DS")"
+i=0; while [ "$i" -lt 10 ]; do dadd naming true >/dev/null; i=$((i + 1)); done
+eq "awd stats looks at the last 10 of a category" "naming followed=10 overridden=0" "$("$AWD" stats --state "$DS")"
+dadd ui-text false >/dev/null
+eq "awd stats has one line per category" "naming followed=10 overridden=0|ui-text followed=0 overridden=1" "$("$AWD" stats --state "$DS" | tr '\n' '|' | sed 's/|$//')"
+printf '%s' '{"id":"D40","category":"x"}' >> "$DF"
+eq "awd the id follows the highest one, also after a lost newline" D41 "$(dadd naming true)"
+eq "awd the hand-edited line stays alone" 1 "$(grep -c '^{"id":"D40","category":"x"}$' "$DF")"
+
+sadd() { # tag answer source
+  "$AWD" add --state "$DS" --key ABC-2 --stage analysis --tag "$1" --category edge-case --followed none --source "$3" --answer "$2" >/dev/null
+}
+sadd DoR:S4 out-of-scope operator; sadd DoR:S4 out-of-scope operator
+eq "awd two equal answers are no streak" "" "$("$AWD" streak --state "$DS")"
+sadd DoR:S4 out-of-scope operator-checkpoint
+eq "awd a checkpoint record does not make a streak" "" "$("$AWD" streak --state "$DS")"
+sadd DoR:S4 out-of-scope operator
+contains "awd three equal operator answers are a streak" "DoR:S4 out-of-scope D" "$("$AWD" streak --state "$DS")"
+eq "awd a streak names three records" 3 "$("$AWD" streak --state "$DS" | awk '{ print split($3, a, ",") }')"
+sadd DoR:S4 handle operator
+eq "awd a different answer ends the streak" "" "$("$AWD" streak --state "$DS")"
+sadd DoR:S2 other operator; sadd DoR:S2 other operator; sadd DoR:S2 other operator
+eq "awd other is never a streak" "" "$("$AWD" streak --state "$DS")"
+
+before="$(cat "$DF")"
+refused() { # name args...
+  n="$1"; shift
+  eq "awd refuses $n" 2 "$("$AWD" "$@" >/dev/null 2>&1; echo $?)"
+}
+base="--stage plan --tag Tech --category naming --followed true --source operator"
+refused "a state outside the run folders" add --state "$TMP/work" --key ABC-1 $base
+refused "the folder of local.json" add --state "$TMP/home/.claude/agentic-workflow/repos/github.com/octo/hello" --key ABC-1 $base
+refused "dot-dot in the state path" add --state "$DS/../../../repos" --key ABC-1 $base
+refused "a relative state path" stats --state agentic-workflow/state/x
+refused "a bad key" add --state "$DS" --key 'ABC-1"x' $base
+refused "a lower-case key" add --state "$DS" --key abc-1 $base
+refused "an unknown category" add --state "$DS" --key ABC-1 --stage plan --tag Tech --category 'naming other' --followed true --source operator
+refused "an unknown tag" add --state "$DS" --key ABC-1 --stage plan --tag DoR:Z1 --category naming --followed true --source operator
+refused "an unknown followed value" add --state "$DS" --key ABC-1 --stage plan --tag Tech --category naming --followed yes --source operator
+refused "an unknown source" add --state "$DS" --key ABC-1 --stage plan --tag Tech --category naming --followed true --source agent
+refused "a free-text answer" add --state "$DS" --key ABC-1 $base --answer 'whatever'
+refused "an answer code on a Tech question" add --state "$DS" --key ABC-1 $base --answer handle
+refused "a bad confidence" add --state "$DS" --key ABC-1 $base --confidence 1.50
+refused "an unknown option" add --state "$DS" --question text
+refused "no subcommand"
+eq "awd a refused call writes nothing" "$before" "$(cat "$DF")"
+DL="$TMP/home/.claude/agentic-workflow/state/github.com/octo/link"; mkdir -p "$DL"
+ln -s "$TMP/work/target" "$DL/operator-decisions.jsonl"
+refused "a symbolic link as the history file" add --state "$DL" --key ABC-1 $base
+
+# the confidence rules the prompts must keep
+PLANNER="$(cat "$ROOT/agents/implementation-planner.md")"
+ANALYST="$(cat "$ROOT/agents/jira-analyst.md")"
+contains "planner: the threshold" '0.85' "$PLANNER"
+contains "planner: agent-decided" 'agent-decided' "$PLANNER"
+contains "analyst: the READY threshold" 'confidence ≥ 0.85' "$ANALYST"
+eq "analyst: no old threshold" 0 "$(grep -c '0\.75' "$ROOT/agents/jira-analyst.md")"
+contains "setup: aw-decisions rule" '`Bash(aw-decisions *)`' "$(cat "$ROOT/skills/setup/SKILL.md")"
+contains "config schema: aw-decisions rule" '`Bash(aw-decisions *)`' "$(cat "$ROOT/skills/start/references/config-schema.md")"
+for r in correctness conventions security performance; do
+  contains "$r reviewer: agent-decided is in scope" 'agent-decided' "$(cat "$ROOT/agents/$r-reviewer.md")"
+done
+contains "pr-publisher: lists the agent decisions" 'Decisions made by the agent' "$(cat "$ROOT/agents/pr-publisher.md")"
 
 printf '%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

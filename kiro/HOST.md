@@ -36,6 +36,7 @@ Nothing runs in the background and nothing wakes you. Where the shared text star
   - `PLUGIN/bin/aw-paths --tool kiro` with no other argument. It prints every `key=value` line; read them. Stop with "wrong host" when `state` does not contain `/.kiro/agentic-workflow/`.
   - `PLUGIN/bin/gh-as --account <account> --hostname <host> <subcommand> …`, in exactly that argument order. Wherever the shared text writes `--host <host>` after `--account`, write `--hostname <host>`: Kiro's shell tool refuses any command that contains `--host <word>` or `--port <number>` (it takes it for a dev server), so never put those two flags in a command you run.
   - `PLUGIN/bin/jira-attachment …` and `PLUGIN/bin/media-prep …`.
+  - `PLUGIN/bin/aw-decisions add|stats|streak …` (only the main thread runs it).
 - A command is one plain command: no `;`, `&&`, `||`, `|`, `$(…)`, backticks, `>`, `>>`, `<`, `&`, `tee`, or a variable assignment in front of it. Kiro's rules cannot see a redirect after an allowed command, so this rule is yours to keep.
 - `wait-mcp` and `wait-gh-login` do not exist for you.
 

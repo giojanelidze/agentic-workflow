@@ -1,0 +1,163 @@
+#!/bin/sh
+# aw-decisions: how the operator answered the questions of earlier runs, so that later runs ask less.
+#
+# usage: aw-decisions add    --state <dir> --key <KEY> --stage plan|analysis --tag <tag> --category <category>
+#                            --followed true|false|none --source operator|operator-checkpoint
+#                            [--confidence 0.NN] [--answer <code>]
+#        aw-decisions stats  --state <dir>
+#        aw-decisions streak --state <dir>
+#
+# The file is <dir>/operator-decisions.jsonl, one record per line; <dir> is the run folder of aw-paths
+# (`state`), and nothing outside a folder under .../agentic-workflow/state/ is ever read or written: the allow
+# rule for this script must never reach local.json, config.json or a settings file.
+# Every value comes from a fixed list or a strict pattern. No question text, option text or other ticket text
+# is accepted, so nothing from a ticket ever reaches a command line or this file.
+#
+#   add      appends one record, prints its id (D<n>).
+#            tag       Tech, DoR:U1-U6, DoR:B1-B4 or DoR:S1-S4
+#            category  naming file-placement error-handling validation ui-text ui-layout state-management
+#                      api-shape edge-case test-scope refactor-scope other
+#            followed  whether the operator took the recommended option; none = there was nothing to follow
+#                      (or the choice was one that is always asked)
+#            answer    only for DoR:S2 and DoR:S4: follow-existing new-design out-of-scope handle other
+#   stats    one line per category that has an answer, `<category> followed=<n> overridden=<n>`, over the last
+#            10 records of that category whose followed is true or false. `other` is never counted.
+#   streak   for DoR:S2 and DoR:S4: `<tag> <answer> D<a>,D<b>,D<c>` when the last 3 answers the operator typed
+#            or chose (source operator) are the same and not `other`. Nothing otherwise.
+#
+# Exit codes: 0 ok (stats and streak print nothing when there is no history), 2 bad usage or a refused value,
+# 3 the file cannot be written. Plain POSIX sh and awk; no jq or python.
+
+usage() {
+  echo "usage: aw-decisions add --state <dir> --key <KEY> --stage plan|analysis --tag <tag> --category <category> --followed true|false|none --source operator|operator-checkpoint [--confidence 0.NN] [--answer <code>]" >&2
+  echo "       aw-decisions stats|streak --state <dir>" >&2
+  exit 2
+}
+refuse() {
+  echo "aw-decisions: $1" >&2
+  exit 2
+}
+
+CATEGORIES="naming file-placement error-handling validation ui-text ui-layout state-management api-shape edge-case test-scope refactor-scope other"
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift
+case "$cmd" in add|stats|streak) ;; *) usage ;; esac
+
+state=""; key=""; stage=""; tag=""; category=""; followed=""; source_=""; confidence=""; answer=""
+while [ $# -gt 0 ]; do
+  [ $# -ge 2 ] || usage
+  case "$1" in
+    --state) state="$2" ;;
+    --key) key="$2" ;;
+    --stage) stage="$2" ;;
+    --tag) tag="$2" ;;
+    --category) category="$2" ;;
+    --followed) followed="$2" ;;
+    --source) source_="$2" ;;
+    --confidence) confidence="$2" ;;
+    --answer) answer="$2" ;;
+    *) usage ;;
+  esac
+  shift 2
+done
+
+[ -n "$state" ] || usage
+state="${state%/}"
+case "$state" in
+  /*/agentic-workflow/state/?*) ;;
+  *) refuse "--state must be the absolute run folder (.../agentic-workflow/state/...)" ;;
+esac
+case "$state/" in
+  */../*|*/./*) refuse "--state must not contain . or .. segments" ;;
+esac
+file="$state/operator-decisions.jsonl"
+[ ! -L "$file" ] || refuse "$file is a symbolic link"
+
+if [ "$cmd" = stats ]; then
+  [ -f "$file" ] || exit 0
+  awk -v cats="$CATEGORIES" '
+    function get(k,   s) {
+      if (!match($0, "\"" k "\":\"[^\"]*\"")) return ""
+      s = substr($0, RSTART, RLENGTH); sub(/^"[^"]*":"/, "", s); sub(/"$/, "", s); return s
+    }
+    { c = get("category"); f = get("followed"); if (f == "true" || f == "false") { n[c]++; v[c, n[c]] = f } }
+    END {
+      m = split(cats, list, " ")
+      for (i = 1; i <= m; i++) {
+        c = list[i]
+        if (c == "other" || !(c in n)) continue
+        yes = 0; no = 0
+        for (j = (n[c] > 10 ? n[c] - 9 : 1); j <= n[c]; j++) if (v[c, j] == "true") yes++; else no++
+        printf "%s followed=%d overridden=%d\n", c, yes, no
+      }
+    }' "$file"
+  exit 0
+fi
+
+if [ "$cmd" = streak ]; then
+  [ -f "$file" ] || exit 0
+  awk '
+    function get(k,   s) {
+      if (!match($0, "\"" k "\":\"[^\"]*\"")) return ""
+      s = substr($0, RSTART, RLENGTH); sub(/^"[^"]*":"/, "", s); sub(/"$/, "", s); return s
+    }
+    {
+      t = get("tag"); a = get("answer")
+      if (get("source") == "operator" && a != "" && (t == "DoR:S2" || t == "DoR:S4")) { n[t]++; ans[t, n[t]] = a; id[t, n[t]] = get("id") }
+    }
+    END {
+      m = split("DoR:S2 DoR:S4", list, " ")
+      for (i = 1; i <= m; i++) {
+        t = list[i]
+        if (n[t] < 3) continue
+        k = n[t]; a = ans[t, k]
+        if (a == "other" || ans[t, k - 1] != a || ans[t, k - 2] != a) continue
+        printf "%s %s %s,%s,%s\n", t, a, id[t, k - 2], id[t, k - 1], id[t, k]
+      }
+    }' "$file"
+  exit 0
+fi
+
+# add
+number="${key##*-}"
+project="${key%-*}"
+case "$project" in [A-Z]?*) ;; *) refuse "--key must look like ABC-123" ;; esac
+case "$project" in *[!A-Z0-9_]*) refuse "--key must look like ABC-123" ;; esac
+case "$number" in ''|*[!0-9]*) refuse "--key must look like ABC-123" ;; esac
+case "$stage" in plan|analysis) ;; *) refuse "--stage must be plan or analysis" ;; esac
+case "$tag" in
+  Tech|DoR:U[1-6]|DoR:B[1-4]|DoR:S[1-4]) ;;
+  *) refuse "--tag must be Tech or DoR:<code>" ;;
+esac
+found=0
+for c in $CATEGORIES; do [ "$category" = "$c" ] && found=1; done
+[ "$found" = 1 ] || refuse "--category must be one of: $CATEGORIES"
+case "$followed" in true|false|none) ;; *) refuse "--followed must be true, false or none" ;; esac
+case "$source_" in operator|operator-checkpoint) ;; *) refuse "--source must be operator or operator-checkpoint" ;; esac
+case "$confidence" in
+  ''|0.[0-9][0-9]) ;;
+  *) refuse "--confidence must look like 0.70" ;;
+esac
+case "$answer" in
+  '') ;;
+  follow-existing|new-design|out-of-scope|handle|other)
+    case "$tag" in DoR:S2|DoR:S4) ;; *) refuse "--answer belongs to DoR:S2 and DoR:S4 only" ;; esac ;;
+  *) refuse "--answer must be follow-existing, new-design, out-of-scope, handle or other" ;;
+esac
+
+mkdir -p "$state" 2>/dev/null || { echo "aw-decisions: cannot create $state" >&2; exit 3; }
+last=0
+if [ -f "$file" ]; then
+  last="$(awk 'match($0, /^\{"id":"D[0-9]+"/) { v = substr($0, 9, RLENGTH - 9) + 0; if (v > m) m = v } END { print m + 0 }' "$file")"
+fi
+next=$((last + 1))
+now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# a file whose last line lost its newline (a hand edit) must not swallow the new record
+if [ -s "$file" ] && [ -n "$(tail -c 1 "$file")" ]; then
+  printf '\n' >> "$file" 2>/dev/null || { echo "aw-decisions: cannot write $file" >&2; exit 3; }
+fi
+printf '{"id":"D%s","date":"%s","key":"%s","stage":"%s","tag":"%s","category":"%s","followed":"%s","source":"%s","confidence":"%s","answer":"%s"}\n' \
+  "$next" "$now" "$key" "$stage" "$tag" "$category" "$followed" "$source_" "$confidence" "$answer" >> "$file" 2>/dev/null \
+  || { echo "aw-decisions: cannot write $file" >&2; exit 3; }
+echo "D$next"
